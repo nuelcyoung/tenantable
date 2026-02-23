@@ -13,7 +13,7 @@ namespace nuelcyoung\tenantable\Bootstrap;
  *
  * S-3 – Extracted from the bottom of TenantBootstrap.php into its own file
  *        to remove the hidden file-order dependency between TenantBootstrap.php
- *        and Systems.php. Both files now explicitly import this interface.
+ *  now explicitly import this interface.
  */
 interface TenantAwareInterface
 {

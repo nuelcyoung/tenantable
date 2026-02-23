@@ -13,8 +13,6 @@ use CodeIgniter\Events\Events;
 /**
  * TenantBootstrap
  *
- * Orchestrates all tenant-aware subsystems when the tenant context changes.
- * Modelled after stancl/tenancy's bootstrapper concept.
  *
  * Usage (automatic — wired into TenantFilter):
  *   TenantBootstrap::getInstance()->initialize()->boot();
@@ -24,9 +22,8 @@ use CodeIgniter\Events\Events;
  *       ->initialize()
  *       ->bootForTenant($tenantId);
  *
- * M-2 – Systems are now registered from Config\Tenantable::$bootstrappers,
- *        so developers can opt-out of individual systems.
- * M-3 – Added $bootErrors[] + wasSuccessful() so callers can detect failures.
+ * Systems are now registered from Config\Tenantable::$bootstrappers
+ * Added $bootErrors[] + wasSuccessful() so callers can detect failures.
  */
 class TenantBootstrap
 {
@@ -64,7 +61,7 @@ class TenantBootstrap
     protected bool $initialized = false;
 
     /**
-     * M-3 – Errors collected during last boot() call.
+     * Errors collected during last boot() call.
      * @var array<string, string>  [systemName => errorMessage]
      */
     protected array $bootErrors = [];
@@ -76,7 +73,7 @@ class TenantBootstrap
     /**
      * Register all configured systems and mark as initialized.
      *
-     * M-2 – Reads bootstrappers from Config\Tenantable::$bootstrappers so the
+     * Reads bootstrappers from Config\Tenantable::$bootstrappers so the
      *        developer can remove systems they don't need (e.g., SessionSystem
      *        when using JWT, StorageSystem when using S3).
      */
@@ -244,7 +241,7 @@ class TenantBootstrap
     }
 
     // -------------------------------------------------------------------------
-    // M-3 – Boot result inspection
+    // Boot result inspection
     // -------------------------------------------------------------------------
 
     /**

@@ -1,6 +1,6 @@
 {
     "name": "nuelcyoung/tenantable",
-    "description": "Multitenant package for CodeIgniter 4 with multiple identification strategies, bootstrap system, and lifecycle events",
+    "description": "Multi tenancy package for CodeIgniter 4 with multiple identification strategies, bootstrap system, and lifecycle events",
     "type": "library",
     "license": "MIT",
     "keywords": [
@@ -9,10 +9,9 @@
         "subdomain",
         "saas",
         "tenant",
-        "multitenancy",
+        "multi tenancy",
         "codeignter4 multi tenant",
         "CodeIgniter4 Multi Tenant",
-        "CodeIgniter4 Multi-Tenant",
         "CodeIgniter4 Multi-Tenant System",
         "codeigniter4 tenancy",
         "CodeIgniter4 Multi-Tenant Framework"

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+    bootstrap="tests/bootstrap.php"
+    colors="true"
+    cacheDirectory=".phpunit.cache"
+    executionOrder="depends,defects"
+    failOnRisky="true"
+    failOnWarning="true"
+>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory suffix="Test.php">tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory suffix="Test.php">tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+
+    <source>
+        <include>
+            <directory suffix=".php">src</directory>
+        </include>
+        <exclude>
+            <directory suffix=".php">src/Database/Migrations</directory>
+            <file>src/Helpers/tenantable_helper.php</file>
+        </exclude>
+    </source>
+
+    <php>
+        <const name="PHPUNIT_TEST" value="true"/>
+        <env name="TENANT_BASE_DOMAIN" value="test.example.com"/>
+    </php>
+</phpunit>

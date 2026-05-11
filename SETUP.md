@@ -73,6 +73,8 @@ For prefix / database modes:
 php spark tenants:setup --mode=prefix
 
 # Database mode — optionally CREATE DATABASE, then migrate each tenant DB
+# Uses your default DB credentials (.env / Config\Database::$default) for the
+# admin connection. The application's DB user must have CREATE privileges.
 php spark tenants:setup --mode=database --create-db
 
 # Restrict to specific tenants
@@ -85,6 +87,20 @@ Prefix-mode migrations must reference tables via the table manager so prefixes r
 $tableManager = \nuelcyoung\tenantable\Services\TenantTableManager::getInstance();
 $this->forge->createTable($tableManager->getTable('students'));
 ```
+
+### Database-per-tenant credentials
+
+The `tenants` table stores **only** `database_name`. Driver, host, port, username,
+and password are inherited from `Config\Database::$default` (your `.env`) every time
+`TenantDatabaseManager` swaps in a tenant connection.
+
+This is deliberate: storing DB passwords inside the DB they unlock is a security
+foot-gun. Use one application-wide DB user (with privileges on every tenant DB) and
+keep its credentials in `.env` / your secret manager.
+
+If you need multi-server sharding (different host per tenant), register one CI4 DB
+group per shard in `Config\Database` and switch via your own logic — do not put
+credentials back in the `tenants` table.
 
 ---
 

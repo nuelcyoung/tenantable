@@ -12,12 +12,13 @@ use nuelcyoung\tenantable\Services\TenantDatabaseManager;
  * DatabaseSystem
  *
  * Swaps the application's default database connection to the current tenant's
- * database when Config\Tenantable::$separateDatabasePerTenant is true and the
- * tenant row carries a `database_name`.
+ * database when Config\Tenantable::$separateDatabasePerTenant is true.
+ *
+ * The database name is derived dynamically via TenantModel::getDatabaseName()
+ * using the configured $databaseNameGenerator (default: "tenant_{id}").
  *
  * No-op when:
- *   - $separateDatabasePerTenant is false (row-mode or prefix-mode),
- *   - the tenant has no `database_name` (intentional shared-DB tenant), or
+ *   - $separateDatabasePerTenant is false (row-mode or prefix-mode), or
  *   - $tenantId is null (superadmin bypass / no tenant resolved).
  */
 class DatabaseSystem implements TenantAwareInterface
@@ -37,7 +38,7 @@ class DatabaseSystem implements TenantAwareInterface
             return;
         }
 
-        if (empty($tenant['database_name'])) {
+        if (empty($tenant)) {
             return;
         }
 

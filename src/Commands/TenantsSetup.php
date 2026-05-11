@@ -6,7 +6,6 @@ namespace nuelcyoung\tenantable\Commands;
 
 use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
-use CodeIgniter\Database\Database;
 use Config\Services;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
 use nuelcyoung\tenantable\Models\TenantModel;
@@ -167,21 +166,14 @@ class TenantsSetup extends BaseCommand
 
         $success = 0;
         $failed  = 0;
-        $skipped = 0;
 
         foreach ($tenants as $tenant) {
             $id   = (int) $tenant['id'];
             $name = $tenant['name'] ?? $tenant['subdomain'] ?? "tenant #{$id}";
-            $db   = $tenant['database_name'] ?? null;
+            $db   = TenantModel::getDatabaseName($tenant);
 
             CLI::write('');
             CLI::write(CLI::color("[{$id}] {$name}", 'yellow'));
-
-            if (empty($db)) {
-                CLI::write(CLI::color('  skipped: tenant has no database_name', 'yellow'));
-                $skipped++;
-                continue;
-            }
 
             try {
                 if ($createDb && !$this->createDatabase($tenant)) {
@@ -201,56 +193,51 @@ class TenantsSetup extends BaseCommand
 
         CLI::write('');
         CLI::write("  {$success} succeeded" .
-            ($failed > 0 ? ", {$failed} failed" : '') .
-            ($skipped > 0 ? ", {$skipped} skipped" : '') . '.');
+            ($failed > 0 ? ", {$failed} failed" : '') . '.');
         CLI::write('');
     }
 
+    /**
+     * Delegate to TenantDatabaseManager::createDatabase().
+     */
     private function createDatabase(array $tenant): bool
     {
-        $db   = $tenant['database_name'];
-        $host = $tenant['database_host']     ?? 'localhost';
-        $user = $tenant['database_username'] ?? '';
-        $pass = $tenant['database_password'] ?? '';
-        $port = (int) ($tenant['database_port'] ?? 3306);
+        $db      = TenantModel::getDatabaseName($tenant);
+        $manager = $this->getDatabaseManager();
 
-        try {
-            $admin = Database::connect([
-                'DBDriver' => 'MySQLi',
-                'hostname' => $host,
-                'username' => $user,
-                'password' => $pass,
-                'database' => '',
-                'port'     => $port,
-                'DBPrefix' => '',
-            ], false);
-
-            $escaped = str_replace('`', '``', $db);
-            $admin->query("CREATE DATABASE IF NOT EXISTS `{$escaped}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        if ($manager->createDatabase($db)) {
             CLI::write(CLI::color("  database {$db} ensured", 'green'));
             return true;
-        } catch (\Throwable $e) {
-            CLI::write(CLI::color("  CREATE DATABASE failed: {$e->getMessage()}", 'red'));
-            return false;
         }
+
+        CLI::write(CLI::color("  CREATE DATABASE failed for {$db}", 'red'));
+        return false;
     }
 
+    /**
+     * Register a temporary DB group pointing at the tenant's database, using the
+     * default group's credentials as the template. Only `database` is overridden.
+     */
     private function registerTenantGroup(array $tenant): string
     {
         $alias = $tenant['subdomain'] ?? ('tenant_' . $tenant['id']);
 
+        $config             = $this->getDatabaseManager()->getDefaultGroupConfig();
+        $config['database'] = TenantModel::getDatabaseName($tenant);
+
         $dbConfig         = config('Database');
-        $dbConfig->$alias = [
-            'DBDriver' => 'MySQLi',
-            'DBPrefix' => '',
-            'hostname' => $tenant['database_host']     ?? 'localhost',
-            'username' => $tenant['database_username'] ?? '',
-            'password' => $tenant['database_password'] ?? '',
-            'database' => $tenant['database_name'],
-            'port'     => (int) ($tenant['database_port'] ?? 3306),
-        ];
+        $dbConfig->$alias = $config;
 
         return $alias;
+    }
+
+    private function getDatabaseManager(): \nuelcyoung\tenantable\Services\TenantDatabaseManager
+    {
+        $config = config(TenantableConfig::class);
+        return new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
+            $config->separateDatabasePerTenant,
+            $config->defaultDatabaseGroup,
+        );
     }
 
     private function resolveTenants(): array

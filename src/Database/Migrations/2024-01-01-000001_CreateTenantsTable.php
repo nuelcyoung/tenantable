@@ -35,26 +35,6 @@ class CreateTenantsTable extends Migration
                 'type'       => 'VARCHAR',
                 'constraint' => 255,
             ],
-            'database_name' => [
-                'type'       => 'VARCHAR',
-                'constraint' => 100,
-                'null'       => true,
-            ],
-            'database_host' => [
-                'type'       => 'VARCHAR',
-                'constraint' => 255,
-                'null'       => true,
-            ],
-            'database_username' => [
-                'type'       => 'VARCHAR',
-                'constraint' => 100,
-                'null'       => true,
-            ],
-            'database_password' => [
-                'type'       => 'VARCHAR',
-                'constraint' => 255,
-                'null'       => true,
-            ],
             'is_active' => [
                 'type'    => 'BOOLEAN',
                 'default' => true,

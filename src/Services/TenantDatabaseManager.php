@@ -49,7 +49,9 @@ class TenantDatabaseManager
             return false;
         }
 
-        if (empty($tenant['database_name'])) {
+        $dbName = \nuelcyoung\tenantable\Models\TenantModel::getDatabaseName($tenant);
+
+        if (empty($dbName)) {
             return false;
         }
 
@@ -64,7 +66,7 @@ class TenantDatabaseManager
         // the default group is swapped to the tenant.
         self::ensureCentralGroup($this->defaultSnapshot);
 
-        $tenantConfig = $this->buildTenantConfig($tenant, $this->defaultSnapshot ?? []);
+        $tenantConfig = $this->buildTenantConfig($dbName, $this->defaultSnapshot ?? []);
 
         $this->evictCachedConnection($group);
         $dbConfig->{$group} = $tenantConfig;
@@ -160,22 +162,134 @@ class TenantDatabaseManager
         }
     }
 
-    /**
-     * Build a complete CI4 connection config array for the tenant, inheriting
-     * unset keys (charset, DBDebug, etc.) from the snapshot of the original
-     * default group.
-     */
-    protected function buildTenantConfig(array $tenant, array $base): array
-    {
-        $config = $base;
+    // -------------------------------------------------------------------------
+    // Automatic provisioning
+    // -------------------------------------------------------------------------
 
-        $config['DBDriver'] = $tenant['database_driver'] ?? ($base['DBDriver'] ?? 'MySQLi');
-        $config['hostname'] = $tenant['database_host']     ?? ($base['hostname'] ?? 'localhost');
-        $config['username'] = $tenant['database_username'] ?? ($base['username'] ?? '');
-        $config['password'] = $tenant['database_password'] ?? ($base['password'] ?? '');
-        $config['database'] = $tenant['database_name'];
-        $config['port']     = (int) ($tenant['database_port'] ?? ($base['port'] ?? 3306));
-        $config['DBPrefix'] = $tenant['database_prefix']   ?? ($base['DBPrefix'] ?? '');
+    /**
+     * Provision a new tenant database: create it and optionally run migrations.
+     *
+     * Called automatically by the tenantCreated event listener when
+     * Config\Tenantable::$autoCreateDatabase is true.
+     */
+    public function provisionTenant(array $tenant): bool
+    {
+        $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+
+        if (! $this->shouldAutoProvision($config)) {
+            return false;
+        }
+
+        $dbName = \nuelcyoung\tenantable\Models\TenantModel::getDatabaseName($tenant);
+
+        if (! $this->createDatabase($dbName)) {
+            return false;
+        }
+
+        if ($config->autoMigrateTenant && ! empty($config->tenantMigrationsNamespace)) {
+            return $this->migrateTenant($tenant, $config->tenantMigrationsNamespace);
+        }
+
+        return true;
+    }
+
+    /**
+     * CREATE DATABASE IF NOT EXISTS for a tenant.
+     *
+     * Uses the application's default DB credentials (from .env / Config\Database).
+     * The DB user must have CREATE privileges on the server.
+     */
+    public function createDatabase(string $databaseName): bool
+    {
+        try {
+            $base = $this->getDefaultGroupConfig();
+            $base['database'] = '';
+
+            $admin   = \CodeIgniter\Database\Database::connect($base, false);
+            $escaped = str_replace('`', '``', $databaseName);
+            $admin->query("CREATE DATABASE IF NOT EXISTS `{$escaped}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+
+            log_message('info', "Tenantable: database '{$databaseName}' created/ensured.");
+            return true;
+        } catch (\Throwable $e) {
+            log_message('error', "Tenantable: CREATE DATABASE '{$databaseName}' failed: {$e->getMessage()}");
+            return false;
+        }
+    }
+
+    /**
+     * Run tenant migrations against the tenant's database.
+     *
+     * Registers a temporary DB group, runs the migration runner
+     * against it, then cleans up.
+     */
+    public function migrateTenant(array $tenant, string $namespace): bool
+    {
+        $dbName = \nuelcyoung\tenantable\Models\TenantModel::getDatabaseName($tenant);
+        $alias  = 'tenant_provision_' . ($tenant['id'] ?? uniqid());
+
+        try {
+            $config             = $this->getDefaultGroupConfig();
+            $config['database'] = $dbName;
+
+            $dbConfig         = config('Database');
+            $dbConfig->$alias = $config;
+
+            $runner = \Config\Services::migrations();
+            $runner->setNamespace($namespace)->setGroup($alias)->latest();
+
+            log_message('info', "Tenantable: migrations applied to '{$dbName}'.");
+            return true;
+        } catch (\Throwable $e) {
+            log_message('error', "Tenantable: migration for '{$dbName}' failed: {$e->getMessage()}");
+            return false;
+        }
+    }
+
+    /**
+     * Whether auto-provisioning should run based on the current config.
+     */
+    protected function shouldAutoProvision(\nuelcyoung\tenantable\Config\Tenantable $config): bool
+    {
+        if (! $config->autoCreateDatabase) {
+            return false;
+        }
+
+        // Resolve the effective isolation mode
+        $mode = $config->isolationMode;
+        if ($mode === null) {
+            $mode = $config->separateDatabasePerTenant ? 'database' : 'row';
+        }
+
+        return $mode === 'database';
+    }
+
+    /**
+     * Snapshot the application's default DB group config as a plain array.
+     */
+    public function getDefaultGroupConfig(): array
+    {
+        $dbConfig = config('Database');
+        $group    = $dbConfig->defaultGroup ?? $this->defaultGroup;
+
+        return (array) ($dbConfig->{$group} ?? []);
+    }
+
+    /**
+     * Build a complete CI4 connection config array for the tenant.
+     *
+     * Credentials, host, port, driver, charset, DBDebug, etc. are inherited
+     * from the snapshot of the original default group (i.e. Config\Database +
+     * .env). Only `database` is overridden per tenant.
+     *
+     * This is by design: tenant DB credentials must never live in the tenants
+     * table they protect access to. Set a single application-wide DB user in
+     * .env with privileges on all tenant databases.
+     */
+    protected function buildTenantConfig(string $databaseName, array $base): array
+    {
+        $config             = $base;
+        $config['database'] = $databaseName;
 
         return $config;
     }

@@ -132,13 +132,19 @@ public $separateDatabasePerTenant = true;
 ```
 
 ### Tenant Database Config
+
+Only the per-tenant **database name** is stored in the `tenants` table. Credentials,
+host, and port come from `Config\Database::$default` (i.e. your `.env`) — the
+application uses a single DB user with privileges across all tenant databases.
+
 ```sql
 tenants table stores:
-- database_host
-- database_username  
-- database_password
-- database_name
+- database_name   (the only per-tenant override)
 ```
+
+DB credentials are deliberately **not** stored in the tenants table. Storing
+secrets inside the database they unlock is a foot-gun; keep them in `.env` / a
+secret manager instead.
 
 ### Usage
 ```php
@@ -237,11 +243,9 @@ The `tenants` table:
 |-------|------|-------------|
 | id | INT | Primary key |
 | subdomain | VARCHAR(50) | Unique subdomain |
+| domain | VARCHAR(255) | Custom domain (for DomainFilter) |
 | name | VARCHAR(255) | Tenant name |
-| database_name | VARCHAR(100) | Separate DB name |
-| database_host | VARCHAR(255) | DB server |
-| database_username | VARCHAR(100) | DB user |
-| database_password | VARCHAR(255) | DB password |
+| database_name | VARCHAR(100) | DB-per-tenant only; everything else inherits from `.env` |
 | is_active | BOOLEAN | Tenant status |
 | settings | JSON | Custom settings |
 | created_at | DATETIME | Created |

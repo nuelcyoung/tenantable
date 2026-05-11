@@ -17,6 +17,19 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
     public string $defaultDatabaseGroup      = 'default';
 
     /**
+     * Callable that derives the tenant database name from the tenant row.
+     *
+     * Signature: function(array $tenant): string
+     *
+     * When null the package uses the built-in default: "tenant_{id}".
+     * Set this to a Closure, invokable class, or any PHP callable to
+     * implement a custom naming convention (e.g. based on subdomain).
+     *
+     * @var callable|null
+     */
+    public $databaseNameGenerator = null;
+
+    /**
      * Tenant isolation strategy. One of:
      *   - 'row'      Shared DB, tenant_id column on tenant-scoped tables.
      *   - 'prefix'   Shared DB, per-tenant table prefixes (tenant_{id}_*).
@@ -26,6 +39,22 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
      * from $separateDatabasePerTenant (database if true, else row).
      */
     public ?string $isolationMode = null;
+
+    /**
+     * Automatically CREATE DATABASE when a new tenant is inserted.
+     *
+     * Only applies when isolation mode is 'database'. The DB user
+     * configured in Config\Database must have CREATE privileges.
+     */
+    public bool $autoCreateDatabase = true;
+
+    /**
+     * Automatically run tenant migrations after creating the database.
+     *
+     * Only applies when $autoCreateDatabase is true and isolation mode
+     * is 'database'. Uses $tenantMigrationsNamespace for the migrations.
+     */
+    public bool $autoMigrateTenant = true;
 
     /**
      * PSR-4 namespace holding the consuming app's per-tenant migrations.

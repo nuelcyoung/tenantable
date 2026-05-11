@@ -34,10 +34,6 @@ class TenantModel extends GlobalModel
         'subdomain',
         'name',
         'domain',             // For DomainFilter / DomainOrSubdomainFilter
-        'database_name',
-        'database_host',
-        'database_username',
-        'database_password',
         'is_active',
         'settings',
     ];
@@ -104,7 +100,8 @@ class TenantModel extends GlobalModel
     // -------------------------------------------------------------------------
 
     /**
-     * Fire TenantCreated after a successful insert.
+     * Fire TenantCreated after a successful insert and auto-provision the
+     * tenant database when database-per-tenant isolation is configured.
      */
     protected function dispatchCreated(array $data): array
     {
@@ -112,6 +109,14 @@ class TenantModel extends GlobalModel
             $tenant = $this->find((int) $data['id']);
 
             if ($tenant !== null) {
+                // Auto-provision: create DB + run migrations (if configured)
+                $config  = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+                $manager = new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
+                    $config->separateDatabasePerTenant,
+                    $config->defaultDatabaseGroup,
+                );
+                $manager->provisionTenant($tenant);
+
                 \CodeIgniter\Events\Events::trigger('tenantCreated', new TenantCreated(
                     (int) $data['id'],
                     $tenant
@@ -249,14 +254,22 @@ class TenantModel extends GlobalModel
         return $tenant['name'] ?? $tenant['subdomain'] ?? 'Unknown';
     }
 
-    public function validateDatabaseConfig(array $config): bool
+    /**
+     * Derive the database name for a tenant using the configured generator.
+     *
+     * Falls back to the convention "tenant_{id}" when no custom generator
+     * is set in Config\Tenantable::$databaseNameGenerator.
+     */
+    public static function getDatabaseName(array $tenant): string
     {
-        foreach (['database_host', 'database_username', 'database_name'] as $field) {
-            if (empty($config[$field])) {
-                return false;
-            }
+        $config    = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+        $generator = $config->databaseNameGenerator;
+
+        if (is_callable($generator)) {
+            return $generator($tenant);
         }
 
-        return true;
+        // Default convention: tenant_{id}
+        return 'tenant_' . $tenant['id'];
     }
 }

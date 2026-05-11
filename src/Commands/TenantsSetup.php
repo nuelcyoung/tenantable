@@ -108,6 +108,10 @@ class TenantsSetup extends BaseCommand
 
     private function migrateCentral(): bool
     {
+        /** @var TenantableConfig $config */
+        $config    = config(TenantableConfig::class);
+        $tableName = $config->tenantsTable ?? 'tenants';
+
         CLI::write('Migrating central tenants table...', 'yellow');
 
         try {
@@ -115,6 +119,19 @@ class TenantsSetup extends BaseCommand
             $runner->setNamespace('nuelcyoung\\tenantable')->latest();
         } catch (\Throwable $e) {
             CLI::error('  Failed: ' . $e->getMessage());
+            return false;
+        }
+
+        // Verify the table was actually created (catches stale migration history)
+        $db = \Config\Database::connect();
+        if (! $db->tableExists($tableName)) {
+            CLI::error("  Migration reported success but the '{$tableName}' table does not exist.");
+            CLI::write('  This usually means a previous migration run is recorded in the', 'yellow');
+            CLI::write('  `migrations` table but the actual table was dropped manually.', 'yellow');
+            CLI::write('', 'yellow');
+            CLI::write('  Fix: clear the stale migration record and re-run:', 'yellow');
+            CLI::write("    DELETE FROM migrations WHERE namespace = 'nuelcyoung\\tenantable';", 'light_gray');
+            CLI::write('    php spark tenants:setup', 'light_gray');
             return false;
         }
 
@@ -245,15 +262,20 @@ class TenantsSetup extends BaseCommand
         $model     = new TenantModel();
         $idsOption = CLI::getOption('tenants');
 
-        if (!empty($idsOption)) {
-            $ids = array_filter(array_map('intval', explode(',', $idsOption)));
-            if (empty($ids)) {
-                CLI::error('--tenants must be a comma-separated list of integer IDs.');
-                return [];
+        try {
+            if (!empty($idsOption)) {
+                $ids = array_filter(array_map('intval', explode(',', $idsOption)));
+                if (empty($ids)) {
+                    CLI::error('--tenants must be a comma-separated list of integer IDs.');
+                    return [];
+                }
+                return $model->whereIn('id', $ids)->findAll();
             }
-            return $model->whereIn('id', $ids)->findAll();
-        }
 
-        return $model->where('is_active', 1)->findAll();
+            return $model->where('is_active', 1)->findAll();
+        } catch (\Throwable $e) {
+            // Table may not exist yet (initial setup)
+            return [];
+        }
     }
 }

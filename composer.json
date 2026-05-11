@@ -49,6 +49,7 @@
                 "nuelcyoung\\tenantable\\Commands\\TenantsList",
                 "nuelcyoung\\tenantable\\Commands\\TenantsRun",
                 "nuelcyoung\\tenantable\\Commands\\TenantsSetup",
+                "nuelcyoung\\tenantable\\Commands\\TenantsCreate",
                 "nuelcyoung\\tenantable\\Commands\\TenantsMakeModel",
                 "nuelcyoung\\tenantable\\Commands\\TenantsMakeMigration"
             ]

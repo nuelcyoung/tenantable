@@ -1,14 +1,15 @@
 # Tenantable - Multitenant Package for CodeIgniter 4
 
-A robust multitenant package for CodeIgniter 4 that provides subdomain-based tenant identification and automatic tenant isolation.
+A robust multitenant package for CodeIgniter 4 that provides flexible tenant identification and automatic tenant isolation.
 
 ## Features
 
-- **Subdomain-based Tenant Detection** - Automatically identifies tenants from URL subdomains
-- **Multiple Isolation Strategies** - Choose what works best for your needs
-- **Automatic Tenant Context** - Models automatically respect tenant boundaries
-- **Superadmin Bypass** - Built-in support for platform admins
-- **CLI Support** - Gracefully handles CLI requests
+- **Flexible Tenant Identification** — Subdomain, domain, path, or request data
+- **Multiple Isolation Strategies** — Row-level, table prefix, or database-per-tenant
+- **Automatic Provisioning** — Database auto-created and migrated on tenant creation
+- **Automatic Tenant Context** — Models automatically respect tenant boundaries
+- **Superadmin Bypass** — Built-in support for platform admins
+- **CLI Support** — Fan-out commands, scaffolding, and setup CLI tools
 
 ## Requirements
 
@@ -35,6 +36,46 @@ composer require nuelcyoung/tenantable
 
 ---
 
+## Tenant Identification
+
+Tenantable identifies which tenant a request belongs to using **filters**. You choose your strategy by applying the corresponding filter to your routes.
+
+### Available Strategies
+
+| Filter Alias | Class | Identifies by | Example |
+|---|---|---|---|
+| `tenant` / `tenant_subdomain` | `SubdomainFilter` | URL subdomain | `acme.example.com` |
+| `tenant_domain` | `DomainFilter` | Custom domain (stored in `tenants.domain`) | `acme.com` |
+| `tenant_domain_or_subdomain` | `DomainOrSubdomainFilter` | Domain first, falls back to subdomain | `acme.com` or `acme.example.com` |
+| `tenant_path` | `PathFilter` | First URL path segment | `/acme/dashboard` |
+| `tenant_request` | `RequestDataFilter` | Header, query param, or body field | `X-Tenant-ID: acme` |
+
+### How to Configure
+
+Register your chosen filter in `app/Config/Filters.php`:
+
+```php
+// Option A: Apply globally
+public array $globals = [
+    'before' => [
+        'tenant_subdomain' => ['except' => ['health', 'api/*']],
+    ],
+];
+
+// Option B: Apply per route group (you can mix strategies)
+// In Routes.php:
+$routes->group('app', ['filter' => 'tenant_subdomain'], function ($routes) {
+    // Web routes identified by subdomain
+});
+$routes->group('api', ['filter' => 'tenant_request'], function ($routes) {
+    // API routes identified by header/query param
+});
+```
+
+All filters are auto-registered by the package. The default `tenant` alias maps to `SubdomainFilter`.
+
+---
+
 ## Strategy 1: Table Prefix (Recommended)
 
 **Best for**: Most applications. No tenant_id leakage risks.
@@ -55,14 +96,11 @@ php spark migrate -g tenantable
 2. **Configure Filters**
 ```php
 // app/Config/Filters.php
-use nuelcyoung\tenantable\Filters\TenantFilter;
-
-class Filters extends Config\Filters
-{
-    public $filters = [
-        'tenant' => ['before' => ['/*'], 'except' => ['health', 'api/*']],
-    ];
-}
+public array $globals = [
+    'before' => [
+        'tenant_subdomain' => ['except' => ['health', 'api/*']],
+    ],
+];
 ```
 
 3. **Use the Model**
@@ -128,29 +166,58 @@ Using `tenant_id` has security concerns:
 ### Configuration
 ```php
 // app/Config/Tenantable.php
-public $separateDatabasePerTenant = true;
+public bool   $separateDatabasePerTenant = true;
+public ?string $isolationMode            = 'database';
+
+// Point to your tenant-specific migrations
+public ?string $tenantMigrationsNamespace = 'App\Database\Migrations\Tenant';
+
+// Auto-provisioning (both true by default)
+public bool $autoCreateDatabase = true;   // CREATE DATABASE on tenant insert
+public bool $autoMigrateTenant  = true;   // Run migrations after creation
+
+// Optional: custom database naming convention (default: tenant_{id})
+public $databaseNameGenerator = null;
 ```
 
-### Tenant Database Config
+### How It Works
 
-Only the per-tenant **database name** is stored in the `tenants` table. Credentials,
-host, and port come from `Config\Database::$default` (i.e. your `.env`) — the
-application uses a single DB user with privileges across all tenant databases.
+The database name is **derived dynamically** — it is never stored in the tenants table. By default the convention is `tenant_{id}` (e.g. `tenant_1`, `tenant_5`).
 
-```sql
-tenants table stores:
-- database_name   (the only per-tenant override)
+When you insert a new tenant:
+```php
+$tenantModel->insert(['name' => 'Acme Corp', 'subdomain' => 'acme']);
 ```
 
-DB credentials are deliberately **not** stored in the tenants table. Storing
-secrets inside the database they unlock is a foot-gun; keep them in `.env` / a
-secret manager instead.
+The package automatically:
+1. Inserts the row into the `tenants` table
+2. Creates the database: `CREATE DATABASE IF NOT EXISTS tenant_1`
+3. Runs your tenant migrations against the new database
+4. Fires the `tenantCreated` event
+
+On each request, the filter identifies the tenant and swaps `Config\Database::$default` to point at the tenant's database. All models transparently query the correct DB.
+
+### DB Credentials
+
+Connection credentials (host, user, password, port) come from your `.env` / `Config\Database::$default`. Only the database name changes per tenant. Your DB user must have `CREATE` privileges.
+
+Credentials are **never stored in the tenants table** — storing secrets inside the database they unlock is a security foot-gun.
+
+### Custom Naming
+
+```php
+// Default: tenant_1, tenant_2, ...
+public $databaseNameGenerator = null;
+
+// Custom: myapp_acme, myapp_globex, ...
+public $databaseNameGenerator = fn(array $tenant) => 'myapp_' . $tenant['subdomain'];
+```
 
 ### Usage
 ```php
 // Automatically switches to tenant's database
-$school = tenant(); // Connects to school_db
-$students = $studentModel->findAll(); // Queries school_db.students
+$school = tenant(); // Connects to tenant_1
+$students = $studentModel->findAll(); // Queries tenant_1.students
 ```
 
 ---
@@ -216,12 +283,19 @@ src/
 │   ├── TenantInactiveException.php
 │   └── TenantNotFoundException.php
 ├── Filters/
+│   ├── BaseTenantFilter.php
+│   ├── SubdomainFilter.php
+│   ├── DomainFilter.php
+│   ├── DomainOrSubdomainFilter.php
+│   ├── PathFilter.php
+│   ├── RequestDataFilter.php
 │   └── TenantFilter.php
 ├── Helpers/
 │   └── tenantable_helper.php
 ├── Middleware/
 │   └── TenantSecurityMiddleware.php
 ├── Models/
+│   ├── GlobalModel.php
 │   ├── TenantModel.php
 │   └── TenantableModel.php
 ├── Services/
@@ -241,15 +315,16 @@ The `tenants` table:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| id | INT | Primary key |
-| subdomain | VARCHAR(50) | Unique subdomain |
-| domain | VARCHAR(255) | Custom domain (for DomainFilter) |
-| name | VARCHAR(255) | Tenant name |
-| database_name | VARCHAR(100) | DB-per-tenant only; everything else inherits from `.env` |
+| id | INT | Primary key (auto-increment) |
+| subdomain | VARCHAR(50) | Unique subdomain for SubdomainFilter |
+| domain | VARCHAR(255) | Custom domain for DomainFilter |
+| name | VARCHAR(255) | Display name |
 | is_active | BOOLEAN | Tenant status |
-| settings | JSON | Custom settings |
-| created_at | DATETIME | Created |
-| updated_at | DATETIME | Updated |
+| settings | JSON | Custom key-value settings |
+| created_at | DATETIME | Created timestamp |
+| updated_at | DATETIME | Updated timestamp |
+
+> **Note:** The database name is **not stored** in the table. It is derived at runtime via `Config\Tenantable::$databaseNameGenerator` (default: `tenant_{id}`).
 
 ---
 

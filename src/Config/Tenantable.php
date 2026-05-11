@@ -59,7 +59,7 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
     /**
      * PSR-4 namespace holding the consuming app's per-tenant migrations.
      * Required for 'prefix' and 'database' isolation modes.
-     * Example: 'App\Database\TenantMigrations'
+     * Example: 'App\Database\Migrations\Tenant'
      */
     public ?string $tenantMigrationsNamespace = null;
 
@@ -75,6 +75,43 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
      */
     public string $globalModelsNamespace = 'App\Models';
 
+    /**
+     * How the package identifies which tenant a request belongs to.
+     *
+     * This value determines which filter class the 'tenant' alias resolves
+     * to when you register filters via registerFilters(). Apply the chosen
+     * filter to your routes in app/Config/Filters.php.
+     *
+     * Supported values and their filter classes:
+     *
+     *   'tenant_subdomain'           → SubdomainFilter
+     *       Identifies by subdomain: acme.example.com → tenant "acme"
+     *
+     *   'tenant_domain'              → DomainFilter
+     *       Identifies by custom domain stored in tenants.domain column
+     *
+     *   'tenant_domain_or_subdomain' → DomainOrSubdomainFilter
+     *       Tries domain first, falls back to subdomain
+     *
+     *   'tenant_path'                → PathFilter
+     *       Identifies by first URL path segment: /acme/dashboard → tenant "acme"
+     *
+     *   'tenant_request'             → RequestDataFilter
+     *       Identifies from request header, query param, or body field
+     *
+     * Usage in app/Config/Filters.php:
+     *
+     *   public array $globals = [
+     *       'before' => [
+     *           'tenant_subdomain' => ['except' => ['health', 'api/*']],
+     *       ],
+     *   ];
+     *
+     * You can also use different strategies on different route groups:
+     *
+     *   $routes->group('app', ['filter' => 'tenant_subdomain'], ...);
+     *   $routes->group('api', ['filter' => 'tenant_request'], ...);
+     */
     public string $identificationMethod = 'tenant_subdomain';
 
     public array $superadminGroups = ['superadmin'];

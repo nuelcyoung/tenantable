@@ -17,6 +17,7 @@
 
 declare(strict_types=1);
 
+use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
 use nuelcyoung\tenantable\Services\TenantManager;
 
 // -------------------------------------------------------------------------
@@ -109,6 +110,31 @@ if (!function_exists('tenant_url')) {
         $path = ltrim((string) $path, '/');
 
         return "{$scheme}://{$subdomain}.{$baseDomain}/{$path}";
+    }
+}
+
+/**
+ * Run a callable in central (no-tenant) context, then restore the previous
+ * tenant context.
+ *
+ * Useful in DB-per-tenant mode when you need to query a central table from
+ * inside a tenant request without writing the full
+ * TenantBootstrap::getInstance()->runCentral(...) chain.
+ *
+ * Restores the previous tenant even if $callback throws. No-op when no tenant
+ * is currently active.
+ *
+ * Example:
+ *   $plan = central(fn () => (new \App\Models\PlanModel())->find($planId));
+ *
+ * @template T
+ * @param callable(): T $callback
+ * @return T
+ */
+if (!function_exists('central')) {
+    function central(callable $callback): mixed
+    {
+        return TenantBootstrap::getInstance()->runCentral($callback);
     }
 }
 

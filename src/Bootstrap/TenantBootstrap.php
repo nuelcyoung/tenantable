@@ -107,13 +107,14 @@ class TenantBootstrap
     protected function resolveBootstrappers(): array
     {
         $defaults = [
-            'table'   => Systems\TableSystem::class,
-            'cache'   => Systems\CacheSystem::class,
-            'storage' => Systems\StorageSystem::class,
-            'session' => Systems\SessionSystem::class,
-            'logging' => Systems\LoggingSystem::class,
-            'config'  => Systems\ConfigSystem::class,
-            'redis'   => RedisSystem::class,
+            'database' => Systems\DatabaseSystem::class,
+            'table'    => Systems\TableSystem::class,
+            'cache'    => Systems\CacheSystem::class,
+            'storage'  => Systems\StorageSystem::class,
+            'session'  => Systems\SessionSystem::class,
+            'logging'  => Systems\LoggingSystem::class,
+            'config'   => Systems\ConfigSystem::class,
+            'redis'    => RedisSystem::class,
         ];
 
         try {
@@ -202,6 +203,56 @@ class TenantBootstrap
         TenantManager::getInstance()->setTenantById($tenantId);
         $this->lastTenantId = null; // Force re-boot even if same ID
         $this->boot();
+    }
+
+    /**
+     * Run a callable in central (no-tenant) context, then restore the previous
+     * tenant context.
+     *
+     * Useful when, inside a tenant request, you need to query a global table
+     * (e.g. the `tenants` table itself, or a central plans/users table) without
+     * the tenant DB swap or tenant scopes interfering.
+     *
+     * The previous tenant is restored via bootForTenant() even if $callback
+     * throws. If no tenant is currently active, $callback runs without any
+     * swap.
+     *
+     * Note: this is a scoped swap, not a lifecycle event — it does not fire
+     * TenancyEnded / TenancyInitialized. Listeners that perform cleanup on
+     * those events stay quiet during the swap.
+     *
+     * @template T
+     * @param callable(): T $callback
+     * @return T
+     */
+    public function runCentral(callable $callback): mixed
+    {
+        $tenantManager    = TenantManager::getInstance();
+        $previousTenantId = $tenantManager->getTenantId();
+
+        if ($previousTenantId === null) {
+            return $callback();
+        }
+
+        $tenantManager->clear();
+
+        foreach ($this->systems as $name => $system) {
+            try {
+                $system->boot(null, null);
+            } catch (\Throwable $e) {
+                log_message('error', "TenantBootstrap::runCentral: '{$name}' failed to switch to central: {$e->getMessage()}", [
+                    'exception' => $e,
+                ]);
+            }
+        }
+
+        $this->lastTenantId = null;
+
+        try {
+            return $callback();
+        } finally {
+            $this->bootForTenant($previousTenantId);
+        }
     }
 
     /**

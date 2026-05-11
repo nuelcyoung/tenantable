@@ -5,40 +5,36 @@ declare(strict_types=1);
 namespace nuelcyoung\tenantable\Services;
 
 use CodeIgniter\Database\BaseConnection;
-use CodeIgniter\Database\Database;
 use Config\Database as DbConfig;
 
 /**
  * TenantDatabaseManager
  *
- * Handles dynamic database connections for multi-tenant applications.
- * Switches between tenant databases based on current tenant.
+ * Handles dynamic database swapping for database-per-tenant isolation.
  *
- * FIX 2.3 – Fixed wrong Database::connect() API usage in establishConnection().
- * FIX 2.4 – Fixed switchToDefault() passing `false` to db_connect().
+ * Strategy:
+ *   - Snapshot the original default-group config on first swap.
+ *   - On connectToTenant(), close any cached default connection, evict it
+ *     from \Config\Database's static $instances cache, then overwrite
+ *     \Config\Database::$default with the tenant's connection config.
+ *   - The next call to db_connect() / Model::__construct() will lazily
+ *     build a fresh default connection from the new config — so every
+ *     Model in the app transparently hits the tenant's DB.
+ *   - switchToDefault() reverses the swap by restoring the snapshot the
+ *     same way.
+ *
+ * This requires the consuming app to have an authoritative \Config\Database
+ * class (which all CI4 apps do).
  */
 class TenantDatabaseManager
 {
-    /**
-     * Current tenant DB connection config.
-     */
     protected ?array $tenantDbConfig = null;
-
-    /**
-     * Whether multi-database mode is enabled.
-     */
+    protected ?array $defaultSnapshot = null;
+    protected bool $swapped = false;
     protected bool $enabled = false;
-
-    /**
-     * Default database group name.
-     */
     protected string $defaultGroup = 'default';
 
-    /**
-     * Active tenant connections, keyed by subdomain alias.
-     *
-     * @var array<string, BaseConnection>
-     */
+    /** @var array<string, BaseConnection> */
     protected array $connections = [];
 
     public function __construct(bool $enabled = false, string $defaultGroup = 'default')
@@ -47,19 +43,9 @@ class TenantDatabaseManager
         $this->defaultGroup = $defaultGroup;
     }
 
-    // -------------------------------------------------------------------------
-    // Connection management
-    // -------------------------------------------------------------------------
-
-    /**
-     * Connect to a tenant's own database.
-     *
-     * Returns true if a dedicated connection was established,
-     * false if multi-database mode is disabled or tenant has no separate DB.
-     */
     public function connectToTenant(array $tenant): bool
     {
-        if (!$this->enabled) {
+        if (! $this->enabled) {
             return false;
         }
 
@@ -67,26 +53,29 @@ class TenantDatabaseManager
             return false;
         }
 
-        $alias = $tenant['subdomain'] ?? 'tenant_' . ($tenant['id'] ?? 'unknown');
+        $dbConfig = config('Database');
+        $group    = $this->defaultGroup;
 
-        $this->tenantDbConfig = [
-            'DBDriver' => 'MySQLi',
-            'DBPrefix' => '',
-            'hostname' => $tenant['database_host']     ?? 'localhost',
-            'username' => $tenant['database_username'] ?? '',
-            'password' => $tenant['database_password'] ?? '',
-            'database' => $tenant['database_name'],
-            'port'     => (int) ($tenant['database_port'] ?? 3306),
-        ];
+        if (! $this->swapped) {
+            $this->defaultSnapshot = (array) ($dbConfig->{$group} ?? []);
+        }
 
-        $this->connections[$alias] = $this->establishConnection($this->tenantDbConfig, $alias);
+        // Make the original/central DB reachable via the 'central' group while
+        // the default group is swapped to the tenant.
+        self::ensureCentralGroup($this->defaultSnapshot);
+
+        $tenantConfig = $this->buildTenantConfig($tenant, $this->defaultSnapshot ?? []);
+
+        $this->evictCachedConnection($group);
+        $dbConfig->{$group} = $tenantConfig;
+
+        $this->connections[$group] = DbConfig::connect($group, true);
+        $this->tenantDbConfig       = $tenantConfig;
+        $this->swapped              = true;
 
         return true;
     }
 
-    /**
-     * Switch to a specific tenant by subdomain (looks up DB credentials first).
-     */
     public function switchToTenant(string $subdomain): bool
     {
         $tenantModel = new \nuelcyoung\tenantable\Models\TenantModel();
@@ -100,54 +89,28 @@ class TenantDatabaseManager
     }
 
     /**
-     * Switch back to the default database group (for superadmin queries).
-     *
-     * FIX 2.4 – Was calling `db_connect(false)` which is not valid.
-     *            Now correctly reconnects using the configured default group name.
+     * Restore the original default-group config and evict the tenant connection.
      */
     public function switchToDefault(): void
     {
-        if ($this->enabled) {
-            db_connect($this->defaultGroup);
+        if (! $this->enabled || ! $this->swapped || $this->defaultSnapshot === null) {
+            return;
         }
+
+        $dbConfig = config('Database');
+        $group    = $this->defaultGroup;
+
+        $this->evictCachedConnection($group);
+        $dbConfig->{$group} = $this->defaultSnapshot;
+
+        $this->tenantDbConfig = null;
+        $this->swapped        = false;
+        unset($this->connections[$group]);
     }
-
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
-
-    /**
-     * Establish (and return) a new named database connection.
-     *
-     * FIX 2.3 – The original code called:
-     *   $db = Database::connect($config);
-     *   Database::connect($db, $alias);   // ← invalid, second arg is not an alias
-     *
-     * The correct approach is to pass the config array directly to
-     * Database::connect() with the alias (group name) as the second argument.
-     *
-     * @param array  $config  CI4 database config array
-     * @param string $alias   Group name / alias for this connection
-     * @return BaseConnection
-     */
-    protected function establishConnection(array $config, string $alias): BaseConnection
-    {
-        // CI4's Database::connect() accepts a config array as the first argument
-        // and an optional $getShared flag (bool). To create a named/aliased
-        // connection we store it in DbConfig so db_connect($alias) works later.
-        $dbConfig         = config('Database');
-        $dbConfig->$alias = $config;
-
-        return Database::connect($alias, false); // false → create fresh connection
-    }
-
-    // -------------------------------------------------------------------------
-    // Status / Helpers
-    // -------------------------------------------------------------------------
 
     public function isConnectedToTenant(): bool
     {
-        return $this->tenantDbConfig !== null;
+        return $this->swapped;
     }
 
     public function getCurrentConfig(): ?array
@@ -162,15 +125,86 @@ class TenantDatabaseManager
     }
 
     /**
-     * Test whether a database config is reachable.
+     * Register the 'central' database group on \Config\Database so models
+     * extending GlobalModel can reach the central/original DB regardless of
+     * whether a tenant swap is active.
+     *
+     * Idempotent: never overwrites an existing 'central' group, so a
+     * user-defined one is respected. When $explicitConfig is provided, it is
+     * used as the seed; otherwise the current default group is mirrored.
      */
+    public static function ensureCentralGroup(?array $explicitConfig = null): void
+    {
+        $dbConfig = config('Database');
+
+        if (isset($dbConfig->central)) {
+            return;
+        }
+
+        if ($explicitConfig !== null) {
+            $dbConfig->central = $explicitConfig;
+            return;
+        }
+
+        $defaultGroup      = $dbConfig->defaultGroup ?? 'default';
+        $dbConfig->central = (array) ($dbConfig->{$defaultGroup} ?? []);
+    }
+
     public function testConnection(array $config): bool
     {
         try {
-            $db = Database::connect($config, false);
+            $db = DbConfig::connect($config, false);
             return $db->connect() !== false;
         } catch (\Throwable $e) {
             return false;
+        }
+    }
+
+    /**
+     * Build a complete CI4 connection config array for the tenant, inheriting
+     * unset keys (charset, DBDebug, etc.) from the snapshot of the original
+     * default group.
+     */
+    protected function buildTenantConfig(array $tenant, array $base): array
+    {
+        $config = $base;
+
+        $config['DBDriver'] = $tenant['database_driver'] ?? ($base['DBDriver'] ?? 'MySQLi');
+        $config['hostname'] = $tenant['database_host']     ?? ($base['hostname'] ?? 'localhost');
+        $config['username'] = $tenant['database_username'] ?? ($base['username'] ?? '');
+        $config['password'] = $tenant['database_password'] ?? ($base['password'] ?? '');
+        $config['database'] = $tenant['database_name'];
+        $config['port']     = (int) ($tenant['database_port'] ?? ($base['port'] ?? 3306));
+        $config['DBPrefix'] = $tenant['database_prefix']   ?? ($base['DBPrefix'] ?? '');
+
+        return $config;
+    }
+
+    /**
+     * Close and evict any cached connection for the given group so the next
+     * db_connect($group) call rebuilds it from the (just-mutated) config.
+     */
+    protected function evictCachedConnection(string $group): void
+    {
+        try {
+            $existing = DbConfig::connect($group, true);
+            if ($existing instanceof BaseConnection) {
+                $existing->close();
+            }
+        } catch (\Throwable $e) {
+            // No existing connection — nothing to close.
+        }
+
+        try {
+            $ref       = new \ReflectionClass(DbConfig::class);
+            $prop      = $ref->getProperty('instances');
+            $prop->setAccessible(true);
+            $instances = (array) $prop->getValue();
+            unset($instances[$group]);
+            $prop->setValue(null, $instances);
+        } catch (\Throwable $e) {
+            // Property layout may differ across CI4 minor versions; the
+            // config mutation alone still affects fresh callers.
         }
     }
 }

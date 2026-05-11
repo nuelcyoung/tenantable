@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace nuelcyoung\tenantable\Models;
 
-use CodeIgniter\Model;
 use nuelcyoung\tenantable\Events\TenantCreated;
 use nuelcyoung\tenantable\Events\TenantUpdated;
 use nuelcyoung\tenantable\Events\TenantDeleted;
@@ -23,7 +22,7 @@ use nuelcyoung\tenantable\Events\TenantDeleted;
  * FIX 3.3 – updateSettings() passes plain array; ORM cast handles JSON.
  * FIX 3.4 – Removed dead $deletedField = 'deleted_at'.
  */
-class TenantModel extends Model
+class TenantModel extends GlobalModel
 {
     protected $table            = 'tenants';
     protected $primaryKey       = 'id';

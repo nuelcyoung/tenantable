@@ -47,7 +47,9 @@
         "codeigniter4": {
             "commands": [
                 "nuelcyoung\\tenantable\\Commands\\TenantsList",
-                "nuelcyoung\\tenantable\\Commands\\TenantsRun"
+                "nuelcyoung\\tenantable\\Commands\\TenantsRun",
+                "nuelcyoung\\tenantable\\Commands\\TenantsSetup",
+                "nuelcyoung\\tenantable\\Commands\\TenantsMakeModel"
             ]
         }
     },

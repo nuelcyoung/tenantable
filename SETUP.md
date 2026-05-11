@@ -1,151 +1,265 @@
-<?php
+# Setup Guide — Tenantable
 
-declare(strict_types=1);
+Step-by-step setup for integrating Tenantable into a CodeIgniter 4 application.
 
-namespace nuelcyoung\tenantable;
+For the conceptual overview and architecture trade-offs, see `README.md`.
 
-/**
- * Setup Instructions for CodeIgniter 4
- * 
- * Add these to your app/Config/Events.php
- */
+---
 
-/*
-// app/Config/Events.php
+## 1. Install
 
-use CodeIgniter\Events\Events;
-use nuelcyoung\tenantable\Bootstrap\EarlyTenantDetector;
-use nuelcyoung\tenantable\Filters\TenantFilter;
+```bash
+composer require nuelcyoung/tenantable
+```
 
-/**
- * CRITICAL: Early tenant detection (Priority 1)
- * 
- * Must run BEFORE:
- * - Session initialization
- * - Cache initialization
- * - Database auto-connection
- * - Any services needing tenant context
- */
-Events::on('pre_system', [EarlyTenantDetector::class, 'detect'], 1);
+The package auto-registers four Spark commands via `composer.json#extra.codeigniter4.commands`:
 
-/**
- * Late tenant detection via Filter
- * 
- * This runs after early detection but provides:
- * - Request object available
- * - Better error handling
- * - Redirect capability
- */
-// In app/Config/Filters.php:
-public $filters = [
-    'tenant' => ['before' => ['/*'], 'except' => ['health', 'api/*']],
+| Command | Purpose |
+|---------|---------|
+| `tenants:setup` | Provision storage for the configured isolation mode |
+| `tenants:list` | List all (or `--active` / `--inactive`) tenants |
+| `tenants:run` | Run any Spark command once per tenant |
+| `tenants:make-model` | Scaffold a tenant-scoped or global model |
+
+The helper file `src/Helpers/tenantable_helper.php` is auto-loaded — `tenant_id()`, `tenant()`, `central()`, etc. are globally available.
+
+---
+
+## 2. Publish the package config
+
+Copy `vendor/nuelcyoung/tenantable/src/Config/Tenantable.php` to `app/Config/Tenantable.php` and adjust:
+
+```php
+public string $baseDomain = 'example.com';
+
+// 'row' | 'prefix' | 'database' — leave null to derive from $separateDatabasePerTenant
+public ?string $isolationMode = 'row';
+
+public bool   $separateDatabasePerTenant = false;
+public string $defaultDatabaseGroup      = 'default';
+
+// Required for 'prefix' and 'database' modes
+public ?string $tenantMigrationsNamespace = 'App\Database\TenantMigrations';
+
+// Used by tenants:make-model
+public string $tenantModelsNamespace = 'App\Models\Tenant';
+public string $globalModelsNamespace = 'App\Models';
+
+public array $superadminGroups = ['superadmin'];
+
+public array $bypassRoutes = ['api/*', 'health', '_health'];
+
+public bool $allowLocalhost = true;
+```
+
+Other knobs worth knowing: `$throwExceptions`, `$notFoundView`, `$inactiveView`, `$cacheTenantData`, `$cacheTtl`, `$subdomainRules`, and `$bootstrappers` (the registered subsystems — remove any you don't need, e.g. `session` when using JWT, `storage` when using S3).
+
+---
+
+## 3. Provision the tenants table
+
+Run once per environment:
+
+```bash
+php spark tenants:setup
+```
+
+This runs the package's internal migration (`CreateTenantsTable`) against the `default` DB group and prints next steps for your chosen mode.
+
+For prefix / database modes:
+
+```bash
+# Prefix mode — runs your tenant migrations once per tenant with the table manager seeded
+php spark tenants:setup --mode=prefix
+
+# Database mode — optionally CREATE DATABASE, then migrate each tenant DB
+php spark tenants:setup --mode=database --create-db
+
+# Restrict to specific tenants
+php spark tenants:setup --tenants=1,3
+```
+
+Prefix-mode migrations must reference tables via the table manager so prefixes resolve correctly:
+
+```php
+$tableManager = \nuelcyoung\tenantable\Services\TenantTableManager::getInstance();
+$this->forge->createTable($tableManager->getTable('students'));
+```
+
+---
+
+## 4. Register the tenant filter
+
+In `app/Config/Filters.php`:
+
+```php
+public array $aliases = [
+    // ...existing aliases
+    'tenant' => \nuelcyoung\tenantable\Filters\TenantFilter::class,
 ];
 
-// In app/Config/Routes.php (if needed):
-$routes->setDefaultNamespace('App\Controllers');
+public array $globals = [
+    'before' => [
+        'tenant' => ['except' => ['health', 'api/*']],
+    ],
+];
+```
 
-/**
- * Session Configuration
- * 
- * The EarlyTenantDetector automatically configures session.
- * DO NOT set session.savePath in php.ini or Config/Session.php
- * The detector will set it dynamically based on tenant.
- */
+The default `tenant` alias resolves via subdomain. Pick a different identification strategy by swapping the class (or registering it under a different alias):
 
-/**
- * Alternative: Session Data Validation (if you can't use early detection)
- * 
- * If early detection isn't possible, validate session data:
- */
-Events::on('post_controller_constructor', function() {
-    $sessionTenant = session()->get('tenant_id');
-    $currentTenant = \nuelcyoung\tenantable\Services\TenantManager::getInstance()->getTenantId();
-    
-    if ($sessionTenant !== null && $sessionTenant !== $currentTenant) {
-        // Tenant mismatch - destroy session
-        session()->destroy();
-        session()->start();
-        session()->set('tenant_id', $currentTenant);
-    }
-});
+| Filter class | Identifies by |
+|---|---|
+| `Filters\SubdomainFilter` (default `tenant`) | `school1.example.com` |
+| `Filters\DomainFilter` | Custom domain stored in `tenants.domain` |
+| `Filters\DomainOrSubdomainFilter` | Domain first, falls back to subdomain |
+| `Filters\PathFilter` | First URI segment, e.g. `/school1/dashboard` |
+| `Filters\RequestDataFilter` | Header / query / body field |
 
-/**
- * CLI Support
- * 
- * For CLI commands, manually set tenant:
- */
-// php spark tenant:switch school1
-// or
-// TENANT_SUBDOMAIN=school1 php spark migrate
+The filter's `before()` calls `TenantBootstrap::initialize()->boot()`, which wires every subsystem listed in `Config\Tenantable::$bootstrappers` (database swap, table prefix, cache prefix, storage paths, session save path, log channel, tenant-scoped config).
 
-if (PHP_SAPI === 'cli') {
-    $subdomain = $_ENV['TENANT_SUBDOMAIN'] ?? null;
-    
-    if ($subdomain) {
-        \nuelcyoung\tenantable\Services\TenantManager::getInstance()
-            ->setTenantBySubdomain($subdomain);
-    }
-}
+### Security middleware (recommended)
 
-/**
- * Helper Functions
- * 
- * Available globally after autoload:
- */
-// tenant_id() - Get current tenant ID
-// tenant() - Get current tenant data
-// tenant_subdomain() - Get current subdomain
-// tenant_url() - Generate tenant URL
-// has_tenant() - Check if tenant is set
+Register `TenantSecurityMiddleware` after `tenant` to enforce tenant presence, strip tampered `tenant_id` POST/GET fields, and shut down booted subsystems at end of request:
 
-/**
- * Model Usage
- * 
- * Option 1: Table Prefix (Recommended)
- */
-use nuelcyoung\tenantable\Traits\TenantTablePrefixModel;
+```php
+public array $aliases = [
+    'tenant'         => \nuelcyoung\tenantable\Filters\TenantFilter::class,
+    'tenant_security'=> \nuelcyoung\tenantable\Middleware\TenantSecurityMiddleware::class,
+];
 
-class StudentModel extends TenantTablePrefixModel
-{
-    protected $table = 'students';
-    // Automatically uses: tenant_1_students, tenant_2_students, etc.
-}
+public array $globals = [
+    'before' => [
+        'tenant'          => ['except' => ['health', 'api/*']],
+        'tenant_security' => ['except' => ['health', 'api/*']],
+    ],
+    'after' => [
+        'tenant_security' => ['except' => ['health', 'api/*']],
+    ],
+];
+```
 
-/**
- * Option 2: tenant_id Column
- */
-use nuelcyoung\tenantable\Traits\TenantableTrait;
+---
 
-class StudentModel extends Model
-{
-    use TenantableTrait;
-    // Automatically adds: WHERE tenant_id = X
-}
+## 5. Models
 
-/**
- * Option 3: Separate Database
- */
-// Configure in tenants table:
-// database_name, database_host, database_username, database_password
+Generate the right shape with the scaffolder:
 
-/**
- * Security: Superadmin Bypass
- */
-// In controller or model:
+```bash
+# row mode (tenant_id column) — default
+php spark tenants:make-model Student
+
+# prefix mode (tenant_1_students, tenant_2_students, ...)
+php spark tenants:make-model Student --prefix --table=students
+
+# global / central table (Plan, AdminUser, etc.)
+php spark tenants:make-model Plan --global
+
+# override the namespace once
+php spark tenants:make-model Student --namespace=App\Models\Tenancy
+```
+
+What you get:
+
+| Flag | Extends | Notes |
+|---|---|---|
+| (none) | `nuelcyoung\tenantable\Models\TenantableModel` | Auto WHERE/INSERT tenant_id |
+| `--prefix` | `CodeIgniter\Model` + `TenantTablePrefixTrait` | Resolves table name per tenant |
+| `--global` | `nuelcyoung\tenantable\Models\GlobalModel` | Bound to `central` DB group |
+
+`GlobalModel` permanently targets the `central` DB group. In row/prefix mode that group is lazily aliased to `default` by `TenantDatabaseManager::ensureCentralGroup()`, so it just works. In database-per-tenant mode it stays pinned to the original DB even when the default group is swapped to a tenant — use it for `tenants`, `plans`, `users`, etc.
+
+---
+
+## 6. Optional: Early tenant detection
+
+Only needed if you must establish tenant context *before* CodeIgniter's bootstrap (e.g. a custom session handler initialized in `Events.php` that needs `tenant_id` immediately).
+
+```php
+// app/Config/Events.php
+use nuelcyoung\tenantable\Bootstrap\EarlyTenantDetector;
+
+Events::on('pre_system', [EarlyTenantDetector::class, 'detect'], 1);
+```
+
+In the normal flow, `TenantFilter` runs in `before` and the booted `SessionSystem` / `CacheSystem` / `StorageSystem` configure paths and prefixes for you — early detection is **not required**. Only enable it when you have evidence that the default flow runs too late for your code.
+
+When enabling early detection, leave `session.savePath` blank in `Config\Session.php` — the detector sets it dynamically.
+
+---
+
+## 7. CLI / queues / background jobs
+
+CLI requests bypass `TenantFilter` (it returns early on `CLIRequest`). To run code with tenant context outside HTTP:
+
+```php
+use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
+
+TenantBootstrap::getInstance()
+    ->initialize()
+    ->bootForTenant($tenantId);
+```
+
+Or use the built-in fan-out:
+
+```bash
+# Runs `php spark migrate` once per active tenant
+php spark tenants:run migrate
+
+# Specific tenants only
+php spark tenants:run db:seed --seeder=DemoSeeder --tenants=1,3
+```
+
+`tenants:run` exposes the current tenant ID to each sub-process via the `TENANTABLE_TENANT_ID` env variable — pick it up in your command if needed.
+
+---
+
+## 8. Helper functions
+
+| Function | Returns |
+|---|---|
+| `tenant_id()` | Current tenant ID or `null` |
+| `tenant()` | Current tenant row or `null` |
+| `tenant_subdomain()` | Current subdomain or `null` |
+| `has_tenant()` | `true` if a tenant is resolved |
+| `tenant_url($path, $subdomain = null)` | Tenant-scoped URL (scheme follows `App::$baseURL`) |
+| `central(callable)` | Run a callback in central (no-tenant) context, restore previous tenant after |
+| `can_bypass_tenant()` | `true` if the authenticated user is in any `$superadminGroups` |
+
+`central()` is the DX wrapper around `TenantBootstrap::runCentral()`. Use it inside a tenant request when you need to query a central table without the tenant DB swap / row filter interfering:
+
+```php
+$plan = central(fn () => (new \App\Models\PlanModel())->find($planId));
+```
+
+---
+
+## 9. Superadmin bypass
+
+```php
+use App\Models\Tenant\StudentModel;
+
 if (can_bypass_tenant()) {
-    // Access all tenants
-    Model::withoutTenant(function() {
-        return Model::findAll();
-    });
+    $all = StudentModel::withoutTenant(fn () => (new StudentModel())->findAll());
 }
 
-/**
- * Configuration
- * 
- * Copy src/Config/Tenantable.php to app/Config/Tenantable.php
- * and customize:
- */
-public $baseDomain = 'example.com';
-public $isolationStrategy = 'table_prefix';
-public $superadminGroups = ['superadmin', 'admin'];
-public $bypassRoutes = ['api/*', 'health'];
+// Or manual toggle (cleared automatically by TenantSecurityMiddleware::after())
+StudentModel::enableTenantBypass();
+$all = (new StudentModel())->findAll();
+StudentModel::disableTenantBypass();
+```
+
+`withoutTenant()` is preferred — it restores the previous bypass state via `finally`, so an exception inside the callback can't leave bypass enabled.
+
+---
+
+## 10. Verify
+
+```bash
+php spark tenants:list           # Shows the tenants table
+php spark tenants:list --active  # Filter
+
+# Smoke-test the fan-out runner
+php spark tenants:run env
+```
+
+If `tenants:list` prints the configured tenants and `tenants:run` reports a per-tenant exit code summary, you're wired up correctly.

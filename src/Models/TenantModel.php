@@ -42,8 +42,8 @@ class TenantModel extends GlobalModel
     protected bool $updateOnlyChanged  = true;
 
     protected array $casts = [
-        'is_active' => 'boolean',
-        'settings'  => 'array',
+        'is_active' => '?boolean',
+        'settings'  => '?array',
     ];
 
     protected array $castHandlers = [];

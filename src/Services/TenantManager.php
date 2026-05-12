@@ -299,8 +299,21 @@ class TenantManager
             return true;
         }
 
-        // Dev TLDs
+        // Dev TLDs (.test, .local, .example) — but NOT when the host is
+        // under our configured baseDomain. Tools like Laravel Herd use
+        // .test TLDs with real subdomain-based routing.
         if (preg_match('/\.(test|local|example)$/', $host)) {
+            // If baseDomain is configured and the host ends with it,
+            // this is a legitimate tenant request, not "localhost".
+            if (!empty($this->baseDomain) && str_ends_with($host, $this->baseDomain)) {
+                return false;
+            }
+
+            // Bare baseDomain itself (e.g. "ci4.test") — not localhost
+            if ($host === $this->baseDomain) {
+                return false;
+            }
+
             return true;
         }
 

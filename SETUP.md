@@ -19,6 +19,7 @@ For the conceptual overview, architecture trade-offs, and usage examples, see [`
 9. [Helper Functions](#9-helper-functions)
 10. [Early Tenant Detection (Optional)](#10-early-tenant-detection-optional)
 11. [Verify](#11-verify)
+12. [Local Development](#12-local-development)
 
 ---
 
@@ -58,6 +59,11 @@ Open `app/Config/Tenantable.php` and adjust the settings below.
 ```php
 public string $baseDomain = 'example.com';
 ```
+
+The `baseDomain` tells the subdomain filter how to extract the tenant identifier from the host.
+For example, with `baseDomain = 'example.com'`, a request to `acme.example.com` resolves to tenant `acme`.
+
+> **Local Development:** If you use Laravel Herd, Valet, or any tool that serves sites under `.test` / `.local` TLDs, set this to your dev domain (e.g. `myapp.test`). The package correctly handles dev TLDs — see [Local Development](#12-local-development) below.
 
 ### Isolation Mode
 
@@ -538,3 +544,87 @@ php spark tenants:run env
 ```
 
 If `tenants:create` provisions the database and runs migrations, and `tenants:list` prints your configured tenants, you're wired up correctly.
+
+---
+
+## 12. Local Development
+
+When developing locally with tools like **Laravel Herd**, **Valet**, or similar, your site is typically served under a `.test` domain (e.g. `myapp.test`). Subdomain-based tenancy works with these dev TLDs — you just need to ensure DNS resolves tenant subdomains.
+
+### Configure baseDomain
+
+Set `baseDomain` to your local dev domain:
+
+```php
+// app/Config/Tenantable.php
+public string $baseDomain = 'myapp.test';
+```
+
+Or via environment variable (takes precedence over config):
+
+```ini
+# .env
+TENANT_BASE_DOMAIN = myapp.test
+```
+
+### DNS for Subdomains
+
+Your base domain (e.g. `myapp.test`) resolves automatically, but **subdomain URLs** like `acme.myapp.test` need DNS configuration.
+
+#### macOS (Herd / Valet)
+
+Herd and Valet include a built-in DNS resolver that handles wildcard subdomains automatically. No extra setup needed — `acme.myapp.test` just works.
+
+#### Windows (Herd for Windows)
+
+Herd for Windows does not include wildcard DNS. You have two options:
+
+**Option A: Hosts file (quick, per-subdomain)**
+
+1. Open Notepad as **Administrator**
+2. Open `C:\Windows\System32\drivers\etc\hosts`
+3. Add entries for each tenant subdomain:
+
+```
+127.0.0.1 acme.myapp.test
+127.0.0.1 demo.myapp.test
+127.0.0.1 foodblog.myapp.test
+```
+
+4. Save and reload your browser.
+
+**Option B: Acrylic DNS Proxy (wildcard, set-and-forget)**
+
+1. Install [Acrylic DNS Proxy](https://mayakron.altervista.org/support/acrylic/Home.htm)
+2. Edit `AcrylicHosts.txt` and add:
+
+```
+127.0.0.1 *.myapp.test
+```
+
+3. Set your network adapter's DNS to `127.0.0.1` (with `8.8.8.8` as fallback)
+4. Any subdomain of `myapp.test` now resolves automatically.
+
+#### Linux
+
+Use `dnsmasq` to resolve wildcard subdomains:
+
+```bash
+# /etc/dnsmasq.conf
+address=/.myapp.test/127.0.0.1
+```
+
+### Verify Local Setup
+
+```bash
+# 1. Check DNS resolves
+ping acme.myapp.test
+
+# 2. Create a tenant
+php spark tenants:create acme "Acme Corp"
+
+# 3. Visit in browser
+# http://acme.myapp.test
+```
+
+If you see your app (not "Server Not Found" or "No tenant context"), everything is wired correctly.

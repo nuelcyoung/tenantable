@@ -121,7 +121,7 @@ $students = $studentModel->findAll();
 ```php
 // app/Config/Tenantable.php
 public $prefixFormat = 'tenant_{id}_{table}'; // Default format
-public $baseDomain = 'example.com';
+public $baseDomain = 'example.com'; // Your production domain (or 'myapp.test' for local dev)
 ```
 
 ---
@@ -403,6 +403,35 @@ The `tenants` table:
 - **IDOR Protection** - Validates tenant_id in requests
 - **Global Table Protection** - Mark tables as exempt from prefixing
 - **Audit Logging** - Log bypass attempts
+
+---
+
+## Local Development
+
+When developing locally with **Laravel Herd**, **Valet**, or similar tools that serve sites under `.test` / `.local` TLDs, subdomain-based tenancy works out of the box — just set `baseDomain` to your local domain:
+
+```php
+// app/Config/Tenantable.php
+public string $baseDomain = 'myapp.test';
+```
+
+Or via environment variable:
+
+```ini
+TENANT_BASE_DOMAIN = myapp.test
+```
+
+Then access tenants at `acme.myapp.test`, `demo.myapp.test`, etc.
+
+### DNS for Subdomains
+
+| Platform | Wildcard DNS | Setup |
+|----------|-------------|-------|
+| **macOS** (Herd/Valet) | ✅ Built-in | No extra setup needed |
+| **Windows** (Herd) | ❌ Not built-in | Add entries to `hosts` file, or install [Acrylic DNS Proxy](https://mayakron.altervista.org/support/acrylic/Home.htm) for `*.myapp.test` wildcard |
+| **Linux** | ❌ Not built-in | Use `dnsmasq` with `address=/.myapp.test/127.0.0.1` |
+
+See [SETUP.md — Local Development](SETUP.md#12-local-development) for detailed instructions.
 
 ---
 

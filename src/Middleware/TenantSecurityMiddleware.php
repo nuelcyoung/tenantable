@@ -7,9 +7,7 @@ namespace nuelcyoung\tenantable\Middleware;
 use CodeIgniter\Filters\FilterInterface;
 use CodeIgniter\HTTP\RequestInterface;
 use CodeIgniter\HTTP\ResponseInterface;
-use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
 use nuelcyoung\tenantable\Services\TenantManager;
-use nuelcyoung\tenantable\Traits\TenantableTrait;
 
 /**
  * TenantSecurityMiddleware
@@ -68,11 +66,7 @@ class TenantSecurityMiddleware implements FilterInterface
      */
     public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
     {
-        // Shutdown all bootstrapped subsystems (restore cache prefix, storage path, etc.)
-        TenantBootstrap::getInstance()->shutdown();
-
-        // Clear bypass flag to prevent state bleed in long-running processes
-        TenantableTrait::disableTenantBypass();
+        // Late teardown is handled by PackageEvents::register() on post_system.
     }
 
     // -------------------------------------------------------------------------

@@ -110,9 +110,9 @@ class EarlyTenantDetector
         
         // Set BEFORE session starts
         $config->savePath = $tenantPath;
-        
-        // Also set session name to include tenant
-        $config->sessionName = 'tenant_' . $tenantId . '_session';
+
+        // Also set session cookie name to include tenant (use declared $cookieName)
+        $config->cookieName = 'tenant_' . $tenantId . '_session';
     }
 
     /**
@@ -193,6 +193,19 @@ class EarlyTenantDetector
         }
         
         if (preg_match('/\.(test|local|example)$/', $host)) {
+            $config      = self::getConfig();
+            $baseDomain  = $config->baseDomain ?? 'localhost';
+            
+            // Hosts under our configured baseDomain are legitimate tenant
+            if (! empty($baseDomain) && str_ends_with($host, $baseDomain)) {
+                return false;
+            }
+            
+            // The bare baseDomain itself (e.g. ci4.test) is also not localhost.
+            if ($host === $baseDomain) {
+                return false;
+            }
+            
             return true;
         }
         

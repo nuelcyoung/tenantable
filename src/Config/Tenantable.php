@@ -70,7 +70,7 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
      *
      * Example:
      *   public array $tenantMigrationsNamespaces = [
-     *       'CodeIgniter\Shield',
+     *       'CodeIgniter\Shield\Database\Migrations',
      *   ];
      *
      * The primary $tenantMigrationsNamespace is always included

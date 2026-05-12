@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace nuelcyoung\tenantable\Services;
 
 use CodeIgniter\Database\BaseConnection;
+use CodeIgniter\Database\Config as DbConnectionFactory;
+use CodeIgniter\Database\ConnectionInterface;
 use Config\Database as DbConfig;
 
 /**
@@ -127,31 +129,50 @@ class TenantDatabaseManager
     }
 
     /**
-     * Register the 'central' database group on \Config\Database so models
-     * extending GlobalModel can reach the central/original DB regardless of
-     * whether a tenant swap is active.
+     * Capture the central database config so models extending GlobalModel
+     * can reach the central/original DB regardless of whether a tenant swap
+     * is active.
      *
-     * Idempotent: never overwrites an existing 'central' group, so a
+     * Idempotent: never overwrites an existing cached config, so a
      * user-defined one is respected. When $explicitConfig is provided, it is
      * used as the seed; otherwise the current default group is mirrored.
+     *
+     * Stored in a static property to avoid PHP 8.2+ dynamic property
+     * deprecation on Config\Database.
      */
     public static function ensureCentralGroup(?array $explicitConfig = null): void
     {
-        $dbConfig = config('Database');
-
-        if (property_exists($dbConfig, 'central') || isset($dbConfig->central)) {
+        if (self::$centralConfig !== null) {
             return;
         }
 
         $seed = $explicitConfig;
 
         if ($seed === null) {
+            $dbConfig     = config('Database');
             $defaultGroup = $dbConfig->defaultGroup ?? 'default';
             $seed         = (array) ($dbConfig->{$defaultGroup} ?? []);
         }
 
-        // Register via the custom property bag to avoid PHP 8.2+ deprecation
-        $dbConfig->central = $seed; // @phpstan-ignore-line — CI4 BaseConfig allows dynamic props
+        self::$centralConfig = $seed;
+    }
+
+    /**
+     * Cached central database config to avoid dynamic property assignment
+     * on Config\Database (PHP 8.2+ deprecation).
+     */
+    private static ?array $centralConfig = null;
+
+    /**
+     * Get a connection to the central (non-tenant) database.
+     */
+    public static function getCentralConnection(): ConnectionInterface
+    {
+        self::ensureCentralGroup();
+
+        $config = self::$centralConfig ?? [];
+
+        return DbConnectionFactory::connect($config, false);
     }
 
     public function testConnection(array $config): bool
@@ -308,9 +329,15 @@ class TenantDatabaseManager
                     continue;
                 }
 
-                // Extract class name: "2026-05-11-163105_CreateUserProfilesTable" → "CreateUserProfilesTable"
-                $className = preg_replace('/^\d{4}-\d{2}-\d{2}-\d{6}_/', '', $basename);
-                $fqcn      = rtrim($namespace, '\\') . '\\' . $className;
+                // Extract class name from file contents (handles both PascalCase
+                // and snake_case filenames used by third-party packages like Shield).
+                $className = $this->extractClassName($file);
+                if ($className === null) {
+                    log_message('warning', "Tenantable: no class found in '{$file}'.");
+                    continue;
+                }
+
+                $fqcn = rtrim($namespace, '\\') . '\\' . $className;
 
                 require_once $file;
 
@@ -558,5 +585,28 @@ class TenantDatabaseManager
             // Property layout may differ across CI4 minor versions; the
             // config mutation alone still affects fresh callers.
         }
+    }
+
+    /**
+     * Extract the class name declared inside a PHP file.
+     *
+     * Handles third-party packages (like Shield) whose migration filenames
+     * use snake_case (create_auth_tables) but declare PascalCase classes
+     * (CreateAuthTables). Parsing the file is more reliable than deriving
+     * the class name from the filename.
+     */
+    protected function extractClassName(string $filePath): ?string
+    {
+        $contents = @file_get_contents($filePath);
+        if ($contents === false) {
+            return null;
+        }
+
+        // Match: class ClassName extends ...
+        if (preg_match('/^\s*class\s+(\w+)\s/m', $contents, $matches)) {
+            return $matches[1];
+        }
+
+        return null;
     }
 }

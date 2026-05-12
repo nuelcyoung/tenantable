@@ -71,7 +71,7 @@ abstract class BaseTenantFilter implements FilterInterface
 
     final public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
     {
-        // Shutdown handled by TenantSecurityMiddleware::after()
+        // Shutdown is handled later by PackageEvents::register() on post_system.
     }
 
     // -------------------------------------------------------------------------

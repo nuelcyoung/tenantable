@@ -28,11 +28,9 @@ use nuelcyoung\tenantable\Services\TenantDatabaseManager;
  */
 abstract class GlobalModel extends Model
 {
-    protected $DBGroup = 'central';
-
     public function __construct(?ConnectionInterface $db = null, ?ValidationInterface $validation = null)
     {
-        TenantDatabaseManager::ensureCentralGroup();
+        $db ??= TenantDatabaseManager::getCentralConnection();
         parent::__construct($db, $validation);
     }
 }

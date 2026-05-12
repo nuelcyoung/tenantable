@@ -7,6 +7,7 @@ namespace nuelcyoung\tenantable\Models;
 use CodeIgniter\Model;
 use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Exceptions\TenantNotFoundException;
+use nuelcyoung\tenantable\Support\TenantContextState;
 
 /**
  * TenantableModel
@@ -38,8 +39,6 @@ abstract class TenantableModel extends Model
      *            Bypass state is now managed by a single flag (below) shared
      *            with TenantableTrait users.
      */
-    protected static bool $bypassTenantFilter = false;
-
     /**
      * FIX 3.1 – Static cache of DESCRIBE results per table.column key.
      *
@@ -77,7 +76,7 @@ abstract class TenantableModel extends Model
      */
     protected function applyTenantFilter(array $data): array
     {
-        if (static::$bypassTenantFilter || $this->isExemptFromTenant()) {
+        if (TenantContextState::isBypassingTenantFilter() || $this->isExemptFromTenant()) {
             return $data;
         }
 
@@ -104,7 +103,7 @@ abstract class TenantableModel extends Model
      */
     protected function enforceTenantId(array $data): array
     {
-        if (static::$bypassTenantFilter || $this->isExemptFromTenant()) {
+        if (TenantContextState::isBypassingTenantFilter() || $this->isExemptFromTenant()) {
             return $data;
         }
 
@@ -129,7 +128,7 @@ abstract class TenantableModel extends Model
      */
     protected function protectTenantId(array $data): array
     {
-        if (static::$bypassTenantFilter || $this->isExemptFromTenant()) {
+        if (TenantContextState::isBypassingTenantFilter() || $this->isExemptFromTenant()) {
             return $data;
         }
 
@@ -154,7 +153,7 @@ abstract class TenantableModel extends Model
      */
     public function find($id = null, $columns = '*')
     {
-        if (!static::$bypassTenantFilter && !$this->isExemptFromTenant()) {
+        if (!TenantContextState::isBypassingTenantFilter() && !$this->isExemptFromTenant()) {
             if ($this->getTenantId() === null) {
                 return null;
             }
@@ -168,7 +167,7 @@ abstract class TenantableModel extends Model
      */
     public function first($columns = '*')
     {
-        if (!static::$bypassTenantFilter && !$this->isExemptFromTenant()) {
+        if (!TenantContextState::isBypassingTenantFilter() && !$this->isExemptFromTenant()) {
             if ($this->getTenantId() === null) {
                 return null;
             }
@@ -189,7 +188,7 @@ abstract class TenantableModel extends Model
      */
     public function countAllResults(bool $reset = true, bool $test = false): int
     {
-        if (!static::$bypassTenantFilter && !$this->isExemptFromTenant()) {
+        if (!TenantContextState::isBypassingTenantFilter() && !$this->isExemptFromTenant()) {
             if ($this->getTenantId() === null) {
                 return 0;
             }
@@ -212,17 +211,17 @@ abstract class TenantableModel extends Model
      */
     public static function enableTenantBypass(): void
     {
-        static::$bypassTenantFilter = true;
+        TenantContextState::enableTenantBypass();
     }
 
     public static function disableTenantBypass(): void
     {
-        static::$bypassTenantFilter = false;
+        TenantContextState::disableTenantBypass();
     }
 
     public static function isBypassingTenantFilter(): bool
     {
-        return static::$bypassTenantFilter;
+        return TenantContextState::isBypassingTenantFilter();
     }
 
     /**
@@ -234,13 +233,17 @@ abstract class TenantableModel extends Model
      */
     public static function withoutTenant(callable $callback): mixed
     {
-        $previous = static::$bypassTenantFilter;
-        static::$bypassTenantFilter = true;
+        $previous = TenantContextState::isBypassingTenantFilter();
+        TenantContextState::enableTenantBypass();
 
         try {
             return $callback();
         } finally {
-            static::$bypassTenantFilter = $previous;
+            if ($previous) {
+                TenantContextState::enableTenantBypass();
+            } else {
+                TenantContextState::disableTenantBypass();
+            }
         }
     }
 

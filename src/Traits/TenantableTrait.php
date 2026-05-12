@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace nuelcyoung\tenantable\Traits;
 
 use nuelcyoung\tenantable\Services\TenantManager;
+use nuelcyoung\tenantable\Support\TenantContextState;
 
 /**
  * Tenantable Trait
@@ -15,8 +16,7 @@ use nuelcyoung\tenantable\Services\TenantManager;
  * FIX 1.4 – Static bypass consolidated: $bypassTenantFilter is now a static
  *            property of each *concrete* class (via late static binding through
  *            a getter), so enabling bypass on one model doesn't bleed into others.
- *            TenantSecurityMiddleware::after() calls disableTenantBypass() which
- *            now also clears the flag via the static property correctly.
+ *            bypass state is now reset centrally at the end of the request.
  *
  * FIX 3.1 – hasTenantColumn() now caches the result statically per table name
  *            to avoid a `DESCRIBE` SQL query on every find/insert/update/delete.
@@ -42,8 +42,6 @@ trait TenantableTrait
      * The important change is that TenantableModel now reads THIS property
      * instead of maintaining a separate, out-of-sync one.
      */
-    protected static bool $bypassTenantFilter = false;
-
     // -------------------------------------------------------------------------
     // FIX 3.1 – DESCRIBE result cache: static, keyed by table name
     // -------------------------------------------------------------------------
@@ -81,7 +79,7 @@ trait TenantableTrait
 
     protected function tenantableBeforeFind(array $data): array
     {
-        if (!$this->isTenantableEnabled() || self::$bypassTenantFilter) {
+        if (!$this->isTenantableEnabled() || TenantContextState::isBypassingTenantFilter()) {
             return $data;
         }
 
@@ -102,7 +100,7 @@ trait TenantableTrait
 
     protected function tenantableBeforeInsert(array $data): array
     {
-        if (!$this->isTenantableEnabled() || self::$bypassTenantFilter) {
+        if (!$this->isTenantableEnabled() || TenantContextState::isBypassingTenantFilter()) {
             return $data;
         }
 
@@ -120,7 +118,7 @@ trait TenantableTrait
 
     protected function tenantableBeforeUpdate(array $data): array
     {
-        if (!$this->isTenantableEnabled() || self::$bypassTenantFilter) {
+        if (!$this->isTenantableEnabled() || TenantContextState::isBypassingTenantFilter()) {
             return $data;
         }
 
@@ -134,7 +132,7 @@ trait TenantableTrait
 
     protected function tenantableBeforeDelete(array $data): array
     {
-        if (!$this->isTenantableEnabled() || self::$bypassTenantFilter) {
+        if (!$this->isTenantableEnabled() || TenantContextState::isBypassingTenantFilter()) {
             return $data;
         }
 
@@ -181,17 +179,17 @@ trait TenantableTrait
 
     public static function enableTenantBypass(): void
     {
-        static::$bypassTenantFilter = true;
+        TenantContextState::enableTenantBypass();
     }
 
     public static function disableTenantBypass(): void
     {
-        static::$bypassTenantFilter = false;
+        TenantContextState::disableTenantBypass();
     }
 
     public static function isBypassingTenantFilter(): bool
     {
-        return static::$bypassTenantFilter;
+        return TenantContextState::isBypassingTenantFilter();
     }
 
     /**
@@ -203,13 +201,17 @@ trait TenantableTrait
      */
     public static function withoutTenant(callable $callback): mixed
     {
-        $previous = static::$bypassTenantFilter;
-        static::$bypassTenantFilter = true;
+        $previous = TenantContextState::isBypassingTenantFilter();
+        TenantContextState::enableTenantBypass();
 
         try {
             return $callback();
         } finally {
-            static::$bypassTenantFilter = $previous;
+            if ($previous) {
+                TenantContextState::enableTenantBypass();
+            } else {
+                TenantContextState::disableTenantBypass();
+            }
         }
     }
 

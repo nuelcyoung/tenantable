@@ -107,7 +107,7 @@ class TenantsCreate extends BaseCommand
                 ))->getDefaultGroupConfig();
                 $baseConfig['database'] = $dbName;
 
-                $testDb = \CodeIgniter\Database\Database::connect($baseConfig, false);
+                $testDb = \Config\Database::connect($baseConfig, false);
                 $testDb->connect();
                 CLI::write(CLI::color('  Database provisioned and accessible.', 'green'));
                 $testDb->close();

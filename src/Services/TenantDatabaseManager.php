@@ -205,7 +205,7 @@ class TenantDatabaseManager
             $base = $this->getDefaultGroupConfig();
             $base['database'] = '';
 
-            $admin   = \CodeIgniter\Database\Database::connect($base, false);
+            $admin   = \Config\Database::connect($base, false);
             $escaped = str_replace('`', '``', $databaseName);
             $admin->query("CREATE DATABASE IF NOT EXISTS `{$escaped}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 

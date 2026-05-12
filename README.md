@@ -7,9 +7,10 @@ A robust multitenant package for CodeIgniter 4 that provides flexible tenant ide
 - **Flexible Tenant Identification** — Subdomain, domain, path, or request data
 - **Multiple Isolation Strategies** — Row-level, table prefix, or database-per-tenant
 - **Automatic Provisioning** — Database auto-created and migrated on tenant creation
+- **Third-Party Migration Support** — Run Shield (or any package) migrations per-tenant automatically
 - **Automatic Tenant Context** — Models automatically respect tenant boundaries
 - **Superadmin Bypass** — Built-in support for platform admins
-- **CLI Support** — Fan-out commands, scaffolding, and setup CLI tools
+- **CLI Support** — Create tenants, scaffold migrations/models, fan-out commands
 
 ## Requirements
 
@@ -178,13 +179,23 @@ public bool $autoMigrateTenant  = true;   // Run migrations after creation
 
 // Optional: custom database naming convention (default: tenant_{id})
 public $databaseNameGenerator = null;
+
+// Include third-party package migrations per-tenant (e.g. Shield)
+public array $tenantMigrationsNamespaces = [
+    'CodeIgniter\Shield',    // Shield's auth tables in every tenant DB
+];
 ```
 
 ### How It Works
 
 The database name is **derived dynamically** — it is never stored in the tenants table. By default the convention is `tenant_{id}` (e.g. `tenant_1`, `tenant_5`).
 
-When you insert a new tenant:
+When you create a tenant:
+```bash
+php spark tenants:create acme "Acme Corp"
+```
+
+Or programmatically:
 ```php
 $tenantModel->insert(['name' => 'Acme Corp', 'subdomain' => 'acme']);
 ```
@@ -192,8 +203,9 @@ $tenantModel->insert(['name' => 'Acme Corp', 'subdomain' => 'acme']);
 The package automatically:
 1. Inserts the row into the `tenants` table
 2. Creates the database: `CREATE DATABASE IF NOT EXISTS tenant_1`
-3. Runs your tenant migrations against the new database
-4. Fires the `tenantCreated` event
+3. Runs your tenant migrations (from `$tenantMigrationsNamespace`)
+4. Runs third-party migrations (from `$tenantMigrationsNamespaces` — e.g. Shield)
+5. Fires the `tenantCreated` event
 
 On each request, the filter identifies the tenant and swaps `Config\Database::$default` to point at the tenant's database. All models transparently query the correct DB.
 
@@ -266,6 +278,41 @@ Model::withoutTenant(function() {
 Model::enableTenantBypass();
 // queries...
 Model::disableTenantBypass();
+```
+
+---
+
+## CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `tenants:setup` | Provision the central tenants table |
+| `tenants:create <subdomain> <name>` | Create a tenant (auto-provisions DB in database mode) |
+| `tenants:list` | List tenants (`--active`, `--inactive`) |
+| `tenants:run <command>` | Run any Spark command per tenant |
+| `tenants:make-model <name>` | Scaffold a tenant or global model |
+| `tenants:make-migration <name>` | Scaffold a tenant migration file |
+
+### Examples
+
+```bash
+# Initial setup
+php spark tenants:setup
+
+# Create tenants
+php spark tenants:create foodblog "Food Blog"
+php spark tenants:create acme "Acme Corp" --domain=acme.com
+
+# Scaffold migrations
+php spark tenants:make-migration CreatePostsTable --table=posts
+php spark tenants:make-migration CreateCategoriesTable
+
+# Scaffold models
+php spark tenants:make-model Post
+php spark tenants:make-model Post --prefix --table=posts
+
+# Run migrations on all tenant DBs
+php spark tenants:run migrate
 ```
 
 ---

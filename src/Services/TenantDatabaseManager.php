@@ -177,6 +177,7 @@ class TenantDatabaseManager
         $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
 
         if (! $this->shouldAutoProvision($config)) {
+            log_message('debug', 'Tenantable: auto-provisioning skipped (mode is not database or autoCreateDatabase is false).');
             return false;
         }
 
@@ -186,11 +187,50 @@ class TenantDatabaseManager
             return false;
         }
 
-        if ($config->autoMigrateTenant && ! empty($config->tenantMigrationsNamespace)) {
-            return $this->migrateTenant($tenant, $config->tenantMigrationsNamespace);
+        if (! $config->autoMigrateTenant) {
+            log_message('info', 'Tenantable: autoMigrateTenant is disabled, skipping migrations.');
+            return true;
         }
 
-        return true;
+        // Build the list of namespaces to migrate
+        $namespaces = $this->resolveTenantMigrationNamespaces($config);
+
+        if (empty($namespaces)) {
+            log_message('warning', 'Tenantable: no tenant migration namespaces configured — skipping migrations.');
+            return true;
+        }
+
+        $allPassed = true;
+        foreach ($namespaces as $ns) {
+            log_message('info', "Tenantable: running tenant migrations for namespace '{$ns}'.");
+            if (! $this->migrateTenant($tenant, $ns)) {
+                $allPassed = false;
+            }
+        }
+
+        return $allPassed;
+    }
+
+    /**
+     * Merge the primary namespace with any additional namespaces.
+     *
+     * @return string[]
+     */
+    protected function resolveTenantMigrationNamespaces(\nuelcyoung\tenantable\Config\Tenantable $config): array
+    {
+        $namespaces = [];
+
+        if (! empty($config->tenantMigrationsNamespace)) {
+            $namespaces[] = $config->tenantMigrationsNamespace;
+        }
+
+        foreach ($config->tenantMigrationsNamespaces as $ns) {
+            if (! empty($ns) && ! in_array($ns, $namespaces, true)) {
+                $namespaces[] = $ns;
+            }
+        }
+
+        return $namespaces;
     }
 
     /**

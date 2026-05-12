@@ -28,11 +28,12 @@ For the conceptual overview, architecture trade-offs, and usage examples, see [`
 composer require nuelcyoung/tenantable
 ```
 
-The package auto-registers four Spark commands via `composer.json`:
+The package auto-registers these Spark commands via `composer.json`:
 
 | Command | Purpose |
 |---------|---------|
 | `tenants:setup` | Provision storage for the configured isolation mode |
+| `tenants:create` | Create a new tenant (with auto-provisioning in database mode) |
 | `tenants:list` | List all (or `--active` / `--inactive`) tenants |
 | `tenants:run` | Run any Spark command once per tenant |
 | `tenants:make-model` | Scaffold a tenant-scoped or global model |
@@ -95,6 +96,18 @@ Required for `prefix` and `database` modes. Points to your app's per-tenant migr
 ```php
 public ?string $tenantMigrationsNamespace = 'App\Database\Migrations\Tenant';
 ```
+
+### Third-Party Migrations (e.g. Shield)
+
+If you use packages like CodeIgniter Shield that have their own migrations, you can run them on each tenant database automatically — no need to copy migration files:
+
+```php
+public array $tenantMigrationsNamespaces = [
+    'CodeIgniter\Shield',
+];
+```
+
+The primary `$tenantMigrationsNamespace` is always included. This array adds **additional** namespaces. Leave it empty (`[]`) if you only need your own tenant migrations.
 
 ### Identification Method
 
@@ -244,14 +257,39 @@ When a tenant is created via `TenantModel::insert()`, the package automatically:
 
 Set `$autoCreateDatabase = false` to disable this and manage databases manually.
 
-**Create a tenant migration:**
+**Create a tenant:**
+
+```bash
+php spark tenants:create foodblog "Food Blog"
+php spark tenants:create acme "Acme Corp" --domain=acme.com
+php spark tenants:create demo "Demo Tenant" --inactive
+```
+
+**Create tenant migrations:**
 
 ```bash
 php spark tenants:make-migration CreateUsersTable
+php spark tenants:make-migration CreatePostsTable --table=posts
 php spark tenants:make-migration AddStatusToOrders --table=orders
 ```
 
-**Manual provisioning:**
+**Include third-party package migrations:**
+
+If you use Shield (or any CI4 package with migrations), add its namespace to run on each tenant database:
+
+```php
+// app/Config/Tenantable.php
+public array $tenantMigrationsNamespaces = [
+    'CodeIgniter\Shield',    // Shield's users, auth_identities, etc.
+];
+```
+
+This means each new tenant database automatically gets:
+- Your custom tables (from `App\Database\Migrations\Tenant`)
+- Shield's auth tables (from `CodeIgniter\Shield`)
+- Any other package migrations you list
+
+**Manual provisioning:****
 
 ```bash
 # CREATE DATABASE + run tenant migrations
@@ -478,6 +516,9 @@ When enabling early detection, leave `session.savePath` blank in `Config\Session
 ## 11. Verify
 
 ```bash
+# Create a tenant
+php spark tenants:create demo "Demo Tenant"
+
 # List tenants
 php spark tenants:list
 php spark tenants:list --active
@@ -486,4 +527,4 @@ php spark tenants:list --active
 php spark tenants:run env
 ```
 
-If `tenants:list` prints your configured tenants and `tenants:run` reports a per-tenant exit code summary, you're wired up correctly.
+If `tenants:create` provisions the database and runs migrations, and `tenants:list` prints your configured tenants, you're wired up correctly.

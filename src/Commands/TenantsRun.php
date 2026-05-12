@@ -7,24 +7,19 @@ namespace nuelcyoung\tenantable\Commands;
 use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Models\TenantModel;
-use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
-use nuelcyoung\tenantable\Services\TenantManager;
+use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
+use nuelcyoung\tenantable\Services\TenantDatabaseManager;
 
 /**
- * tenants:run — execute a Spark command in the context of each tenant
+ * tenants:run — execute a Spark command in the context of each tenant.
+ *
+ * In database-per-tenant mode, migration commands run directly against
+ * each tenant's database. Other commands run as subprocesses with the
+ * TENANTABLE_TENANT_ID env variable set.
  *
  * Usage:
- *   php spark tenants:run db:migrate
+ *   php spark tenants:run migrate
  *   php spark tenants:run db:seed --seeder=TenantSeeder --tenants=1,3,5
- *
- * Options:
- *   --tenants   Comma-separated tenant IDs to run for (default: all active)
- *
- * How it works:
- *   For each tenant it:
- *     1. Boots that tenant's context (TenantBootstrap::bootForTenant)
- *     2. Passes the TENANT_ID env var to the sub-process
- *     3. Runs `php spark <command> <args>` as a shell subprocess
  */
 class TenantsRun extends BaseCommand
 {
@@ -32,7 +27,10 @@ class TenantsRun extends BaseCommand
     protected $name        = 'tenants:run';
     protected $description = 'Run a Spark command for each (or specific) tenant(s).';
     protected $usage       = 'tenants:run <command> [args] [--tenants=1,2,3]';
-    protected $options     = [
+    protected $arguments   = [
+        'command' => 'The Spark command to run (e.g. migrate, db:seed).',
+    ];
+    protected $options = [
         '--tenants' => 'Comma-separated list of tenant IDs (default: all active).',
     ];
 
@@ -43,10 +41,9 @@ class TenantsRun extends BaseCommand
             return;
         }
 
-        $command    = array_shift($params);
-        $extraArgs  = implode(' ', array_map('escapeshellarg', $params));
+        $command   = array_shift($params);
+        $extraArgs = implode(' ', array_map('escapeshellarg', $params));
 
-        // Resolve tenant list
         $model   = new TenantModel();
         $tenants = $this->resolveTenants($model);
 
@@ -55,11 +52,17 @@ class TenantsRun extends BaseCommand
             return;
         }
 
-        $sparkPath = ROOTPATH . 'spark';
-        $php       = PHP_BINARY;
+        /** @var TenantableConfig $config */
+        $config = config(TenantableConfig::class);
+        $mode   = $config->isolationMode
+            ?? ($config->separateDatabasePerTenant ? 'database' : 'row');
+
+        $isMigration = $mode === 'database' && $this->isMigrationCommand($command);
 
         CLI::write('');
-        CLI::write(CLI::color("Running: php spark {$command} {$extraArgs}", 'cyan'));
+        CLI::write(CLI::color("  Running: php spark {$command} {$extraArgs}", 'cyan'));
+        CLI::write(CLI::color("  Mode:    {$mode}", 'cyan'));
+        CLI::write(CLI::color("  Tenants: " . count($tenants), 'cyan'));
         CLI::write('');
 
         $success = 0;
@@ -71,15 +74,11 @@ class TenantsRun extends BaseCommand
 
             CLI::write(CLI::color("  ► [{$id}] {$name}", 'yellow'));
 
-            $exitCode = 0;
-            $cmd      = "{$php} {$sparkPath} {$command} {$extraArgs} 2>&1";
-
-            // Pass tenant context via env variable
-            putenv("TENANTABLE_TENANT_ID={$id}");
-
-            passthru($cmd, $exitCode);
-
-            putenv("TENANTABLE_TENANT_ID=");
+            if ($isMigration) {
+                $exitCode = $this->runMigrations($tenant, $config);
+            } else {
+                $exitCode = $this->runAsSubprocess($id, $command, $extraArgs);
+            }
 
             if ($exitCode === 0) {
                 CLI::write(CLI::color("    ✔ Done", 'green'));
@@ -97,6 +96,73 @@ class TenantsRun extends BaseCommand
     }
 
     /**
+     * Run tenant migrations directly against the tenant's database.
+     */
+    protected function runMigrations(array $tenant, TenantableConfig $config): int
+    {
+        try {
+            $manager = new TenantDatabaseManager(
+                $config->separateDatabasePerTenant,
+                $config->defaultDatabaseGroup,
+            );
+
+            $namespaces = [];
+            if (! empty($config->tenantMigrationsNamespace)) {
+                $namespaces[] = $config->tenantMigrationsNamespace;
+            }
+            foreach ($config->tenantMigrationsNamespaces as $ns) {
+                if (! empty($ns) && ! in_array($ns, $namespaces, true)) {
+                    $namespaces[] = $ns;
+                }
+            }
+
+            if (empty($namespaces)) {
+                CLI::write('    No tenant migration namespaces configured.', 'yellow');
+                return 0;
+            }
+
+            foreach ($namespaces as $ns) {
+                CLI::write("    Migrating: {$ns}", 'light_gray');
+                if (! $manager->migrateTenant($tenant, $ns)) {
+                    return 1;
+                }
+            }
+
+            return 0;
+        } catch (\Throwable $e) {
+            CLI::write(CLI::color("    Error: {$e->getMessage()}", 'red'));
+            return 1;
+        }
+    }
+
+    /**
+     * Run a command as a shell subprocess with the tenant ID in env.
+     */
+    protected function runAsSubprocess(int $tenantId, string $command, string $extraArgs): int
+    {
+        $exitCode  = 0;
+        $sparkPath = ROOTPATH . 'spark';
+        $php       = PHP_BINARY;
+        $cmd       = "{$php} {$sparkPath} {$command} {$extraArgs} 2>&1";
+
+        putenv("TENANTABLE_TENANT_ID={$tenantId}");
+        passthru($cmd, $exitCode);
+        putenv("TENANTABLE_TENANT_ID=");
+
+        return $exitCode;
+    }
+
+    protected function isMigrationCommand(string $command): bool
+    {
+        return in_array($command, [
+            'migrate',
+            'migrate:rollback',
+            'migrate:refresh',
+            'migrate:status',
+        ], true);
+    }
+
+    /**
      * @return array<int, array>
      */
     protected function resolveTenants(TenantModel $model): array
@@ -105,12 +171,10 @@ class TenantsRun extends BaseCommand
 
         if (!empty($idsOption)) {
             $ids = array_filter(array_map('intval', explode(',', $idsOption)));
-
             if (empty($ids)) {
                 CLI::error('--tenants must be a comma-separated list of integer IDs.');
                 return [];
             }
-
             return $model->whereIn('id', $ids)->findAll();
         }
 

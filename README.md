@@ -289,7 +289,7 @@ Model::disableTenantBypass();
 | `tenants:setup` | Provision the central tenants table |
 | `tenants:create <subdomain> <name>` | Create a tenant (auto-provisions DB in database mode) |
 | `tenants:list` | List tenants (`--active`, `--inactive`) |
-| `tenants:run <command>` | Run any Spark command per tenant |
+| `tenants:run <command>` | Run a Spark command per tenant (auto-targets tenant DB in database mode) |
 | `tenants:make-model <name>` | Scaffold a tenant or global model |
 | `tenants:make-migration <name>` | Scaffold a tenant migration file |
 
@@ -311,8 +311,11 @@ php spark tenants:make-migration CreateCategoriesTable
 php spark tenants:make-model Post
 php spark tenants:make-model Post --prefix --table=posts
 
-# Run migrations on all tenant DBs
+# Run migrations on all tenant databases (database mode)
 php spark tenants:run migrate
+
+# Rollback specific tenants
+php spark tenants:run migrate:rollback --tenants=1,3
 ```
 
 ---

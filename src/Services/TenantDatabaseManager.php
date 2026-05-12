@@ -139,17 +139,19 @@ class TenantDatabaseManager
     {
         $dbConfig = config('Database');
 
-        if (isset($dbConfig->central)) {
+        if (property_exists($dbConfig, 'central') || isset($dbConfig->central)) {
             return;
         }
 
-        if ($explicitConfig !== null) {
-            $dbConfig->central = $explicitConfig;
-            return;
+        $seed = $explicitConfig;
+
+        if ($seed === null) {
+            $defaultGroup = $dbConfig->defaultGroup ?? 'default';
+            $seed         = (array) ($dbConfig->{$defaultGroup} ?? []);
         }
 
-        $defaultGroup      = $dbConfig->defaultGroup ?? 'default';
-        $dbConfig->central = (array) ($dbConfig->{$defaultGroup} ?? []);
+        // Register via the custom property bag to avoid PHP 8.2+ deprecation
+        $dbConfig->central = $seed; // @phpstan-ignore-line — CI4 BaseConfig allows dynamic props
     }
 
     public function testConnection(array $config): bool
@@ -266,24 +268,220 @@ class TenantDatabaseManager
     public function migrateTenant(array $tenant, string $namespace): bool
     {
         $dbName = \nuelcyoung\tenantable\Models\TenantModel::getDatabaseName($tenant);
-        $alias  = 'tenant_provision_' . ($tenant['id'] ?? uniqid());
 
         try {
             $config             = $this->getDefaultGroupConfig();
             $config['database'] = $dbName;
 
-            $dbConfig         = config('Database');
-            $dbConfig->$alias = $config;
+            $db    = DbConfig::connect($config, false);
+            $forge = \Config\Database::forge($db);
 
-            $runner = \Config\Services::migrations();
-            $runner->setNamespace($namespace)->setGroup($alias)->latest();
+            // Ensure migrations tracking table exists
+            $this->ensureMigrationTable($db, $forge);
 
-            log_message('info', "Tenantable: migrations applied to '{$dbName}'.");
+            // Resolve namespace → filesystem directory
+            $dir = $this->resolveNamespaceDirectory($namespace);
+            if ($dir === null) {
+                log_message('warning', "Tenantable: cannot resolve '{$namespace}' to a directory.");
+                $db->close();
+                return true; // Not a fatal error — just nothing to do
+            }
+
+            // Discover migration files
+            $files = glob($dir . DIRECTORY_SEPARATOR . '*.php');
+            if (empty($files)) {
+                log_message('info', "Tenantable: no migration files in '{$dir}'.");
+                $db->close();
+                return true;
+            }
+
+            sort($files);
+
+            // Get already-applied migrations
+            $applied = $this->getAppliedMigrations($db, $namespace);
+
+            $ran = 0;
+            foreach ($files as $file) {
+                $basename = pathinfo($file, PATHINFO_FILENAME);
+
+                if (in_array($basename, $applied, true)) {
+                    continue;
+                }
+
+                // Extract class name: "2026-05-11-163105_CreateUserProfilesTable" → "CreateUserProfilesTable"
+                $className = preg_replace('/^\d{4}-\d{2}-\d{2}-\d{6}_/', '', $basename);
+                $fqcn      = rtrim($namespace, '\\') . '\\' . $className;
+
+                require_once $file;
+
+                if (! class_exists($fqcn, false)) {
+                    log_message('warning', "Tenantable: class '{$fqcn}' not found in '{$file}'.");
+                    continue;
+                }
+
+                /** @var \CodeIgniter\Database\Migration $migration */
+                $migration = new $fqcn($forge);
+                $migration->up();
+
+                // Record as applied
+                $db->table('migrations')->insert([
+                    'version'   => $basename,
+                    'class'     => $fqcn,
+                    'group'     => 'default',
+                    'namespace' => $namespace,
+                    'time'      => time(),
+                    'batch'     => $this->getNextBatch($db),
+                ]);
+
+                $ran++;
+                log_message('info', "Tenantable: applied '{$className}' to '{$dbName}'.");
+            }
+
+            $db->close();
+
+            if ($ran > 0) {
+                log_message('info', "Tenantable: {$ran} migration(s) applied to '{$dbName}'.");
+            } else {
+                log_message('info', "Tenantable: '{$dbName}' is up to date for '{$namespace}'.");
+            }
+
             return true;
         } catch (\Throwable $e) {
             log_message('error', "Tenantable: migration for '{$dbName}' failed: {$e->getMessage()}");
             return false;
         }
+    }
+
+    /**
+     * Resolve a PSR-4 namespace to its filesystem directory by checking
+     * registered autoloader mappings and their sub-paths.
+     */
+    protected function resolveNamespaceDirectory(string $namespace): ?string
+    {
+        $autoloader   = \Config\Services::autoloader();
+        $registeredNs = $autoloader->getNamespace();
+        $nsKey        = trim($namespace, '\\');
+
+        // Check for an exact match first
+        foreach ([$nsKey, $nsKey . '\\'] as $key) {
+            if (isset($registeredNs[$key])) {
+                foreach ((array) $registeredNs[$key] as $path) {
+                    if (is_dir($path)) {
+                        return rtrim($path, '/\\');
+                    }
+                }
+            }
+        }
+
+        // Try to resolve from a parent namespace
+        foreach ($registeredNs as $parentNs => $parentPaths) {
+            $parentNs = trim($parentNs, '\\');
+
+            if (! str_starts_with($nsKey, $parentNs . '\\')) {
+                continue;
+            }
+
+            $relative = substr($nsKey, strlen($parentNs) + 1);
+            $relative = str_replace('\\', DIRECTORY_SEPARATOR, $relative);
+
+            foreach ((array) $parentPaths as $basePath) {
+                $fullPath = rtrim($basePath, '/\\') . DIRECTORY_SEPARATOR . $relative;
+
+                if (is_dir($fullPath)) {
+                    return $fullPath;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Ensure the migrations tracking table exists in the tenant database.
+     */
+    protected function ensureMigrationTable(BaseConnection $db, \CodeIgniter\Database\Forge $forge): void
+    {
+        if ($db->tableExists('migrations')) {
+            return;
+        }
+
+        $forge->addField([
+            'id'        => ['type' => 'BIGINT', 'constraint' => 20, 'unsigned' => true, 'auto_increment' => true],
+            'version'   => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'class'     => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'group'     => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'namespace' => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'time'      => ['type' => 'INT', 'constraint' => 11, 'null' => false],
+            'batch'     => ['type' => 'INT', 'constraint' => 11, 'unsigned' => true, 'null' => false],
+        ]);
+        $forge->addKey('id', true);
+        $forge->createTable('migrations', true);
+    }
+
+    protected function getAppliedMigrations(BaseConnection $db, string $namespace): array
+    {
+        if (! $db->tableExists('migrations')) {
+            return [];
+        }
+
+        return array_column(
+            $db->table('migrations')
+               ->where('namespace', $namespace)
+               ->get()
+               ->getResultArray(),
+            'version'
+        );
+    }
+
+    protected function getNextBatch(BaseConnection $db): int
+    {
+        $result = $db->table('migrations')->selectMax('batch')->get()->getRow();
+        return ($result->batch ?? 0) + 1;
+    }
+
+    /**
+     * Ensure a PSR-4 namespace is explicitly registered in CI4's autoloader.
+     *
+     * CI4's FileLocator::listNamespace() only finds files under explicitly
+     * registered namespaces. Sub-namespaces like 'App\Database\Migrations\Tenant'
+     * are not automatically resolvable from the parent 'App' mapping.
+     * This method resolves the path from the parent and registers it.
+     */
+    protected function ensureNamespaceRegistered(string $namespace): void
+    {
+        $autoloader  = \Config\Services::autoloader();
+        $registeredNs = $autoloader->getNamespace();
+
+        // Already registered — nothing to do
+        $nsKey = trim($namespace, '\\');
+        if (isset($registeredNs[$nsKey]) || isset($registeredNs[$nsKey . '\\'])) {
+            return;
+        }
+
+        // Try to resolve from a parent namespace
+        foreach ($registeredNs as $parentNs => $parentPaths) {
+            $parentNs = trim($parentNs, '\\');
+
+            if (! str_starts_with($nsKey, $parentNs . '\\')) {
+                continue;
+            }
+
+            // Convert remaining namespace segments to path segments
+            $relative = substr($nsKey, strlen($parentNs) + 1);
+            $relative = str_replace('\\', DIRECTORY_SEPARATOR, $relative);
+
+            foreach ((array) $parentPaths as $basePath) {
+                $fullPath = rtrim($basePath, '/\\') . DIRECTORY_SEPARATOR . $relative;
+
+                if (is_dir($fullPath)) {
+                    $autoloader->addNamespace($nsKey, $fullPath);
+                    log_message('debug', "Tenantable: registered namespace '{$nsKey}' → '{$fullPath}'.");
+                    return;
+                }
+            }
+        }
+
+        log_message('warning', "Tenantable: could not resolve namespace '{$namespace}' to a directory.");
     }
 
     /**

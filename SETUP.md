@@ -463,14 +463,24 @@ TenantBootstrap::getInstance()
 Run any Spark command once per tenant:
 
 ```bash
-# Runs `php spark migrate` once per active tenant
+# Run tenant migrations on every tenant database
 php spark tenants:run migrate
 
-# Specific tenants only
+# Rollback migrations on specific tenants
+php spark tenants:run migrate:rollback --tenants=1,3
+
+# Run a custom command per tenant
 php spark tenants:run db:seed --seeder=DemoSeeder --tenants=1,3
 ```
 
-`tenants:run` exposes the current tenant ID to each sub-process via the `TENANTABLE_TENANT_ID` env variable — pick it up in your command if needed.
+**How it works by mode:**
+
+| Mode | Migration commands | Other commands |
+|------|-------------------|----------------|
+| **database** | Runs directly against each tenant's DB using `TenantDatabaseManager` — respects all configured migration namespaces | Subprocess with `TENANTABLE_TENANT_ID` env var |
+| **row / prefix** | Subprocess with `TENANTABLE_TENANT_ID` env var | Subprocess with `TENANTABLE_TENANT_ID` env var |
+
+In database mode, `tenants:run migrate` automatically runs migrations from both `$tenantMigrationsNamespace` and `$tenantMigrationsNamespaces` (e.g. Shield) against each tenant's database — no manual DB switching needed.
 
 ---
 

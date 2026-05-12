@@ -143,7 +143,7 @@ class TenantsRun extends BaseCommand
         $exitCode  = 0;
         $sparkPath = ROOTPATH . 'spark';
         $php       = PHP_BINARY;
-        $cmd       = "{$php} {$sparkPath} {$command} {$extraArgs} 2>&1";
+        $cmd       = "{$php} {$sparkPath} " . escapeshellarg($command) . " " . escapeshellarg($extraArgs) . " 2>&1";
 
         putenv("TENANTABLE_TENANT_ID={$tenantId}");
         passthru($cmd, $exitCode);

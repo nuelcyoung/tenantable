@@ -46,6 +46,7 @@
     "extra": {
         "codeigniter4": {
             "commands": [
+                "nuelcyoung\\tenantable\\Commands\\TenantsInstall",
                 "nuelcyoung\\tenantable\\Commands\\TenantsList",
                 "nuelcyoung\\tenantable\\Commands\\TenantsRun",
                 "nuelcyoung\\tenantable\\Commands\\TenantsSetup",

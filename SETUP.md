@@ -27,12 +27,37 @@ For the conceptual overview, architecture trade-offs, and usage examples, see [`
 
 ```bash
 composer require nuelcyoung/tenantable
+php spark tenants:install
 ```
 
-The package auto-registers these Spark commands via `composer.json`:
+`tenants:install` is the recommended first-run setup. It:
+
+1. Asks for base domain, isolation mode, and identification strategy (or accepts flags — see below).
+2. Writes `app/Config/Tenantable.php` (a thin subclass of the package config).
+3. Idempotently patches `app/Config/Filters.php` to add the tenant identification + security filters to `$globals`.
+4. Idempotently patches `app/Config/Events.php` to register `PackageEvents::register()` (and optionally `EarlyTenantDetector`).
+5. Scaffolds `app/Database/Migrations/Tenant/` with a sample migration.
+6. Runs `tenants:setup` to migrate the central tenants tables.
+
+Re-running it is safe — every step detects prior state.
+
+Non-interactive usage:
+
+```bash
+php spark tenants:install \
+    --base-domain=example.com \
+    --mode=prefix \
+    --strategy=domain_or_subdomain \
+    --yes
+```
+
+Flags: `--base-domain`, `--mode`, `--strategy`, `--early-detection`, `--no-migrate`, `--no-sample`, `--no-events`, `--no-filters`, `--force`, `--yes`.
+
+### Spark commands auto-registered via composer
 
 | Command | Purpose |
 |---------|---------|
+| `tenants:install` | One-shot first-run setup (config, filters, events, migrations) |
 | `tenants:setup` | Provision storage for the configured isolation mode |
 | `tenants:create` | Create a new tenant (with auto-provisioning in database mode) |
 | `tenants:list` | List all (or `--active` / `--inactive`) tenants |
@@ -42,11 +67,13 @@ The package auto-registers these Spark commands via `composer.json`:
 
 The helper file `src/Helpers/tenantable_helper.php` is auto-loaded — `tenant_id()`, `tenant()`, `central()`, etc. are globally available.
 
+Filter aliases (`tenant_subdomain`, `tenant_domain`, `tenant_domain_or_subdomain`, `tenant_path`, `tenant_request`, `tenant_security`, `identify_tenant`) are auto-registered into `Config\Filters::$aliases` via the package's `Config\Registrar`. You don't need to map them yourself.
+
 ---
 
 ## 2. Publish & Configure
 
-Copy the package config to your app:
+`tenants:install` writes `app/Config/Tenantable.php` for you. If you skipped the installer (or want to start fresh), copy it manually:
 
 ```bash
 cp vendor/nuelcyoung/tenantable/src/Config/Tenantable.php app/Config/Tenantable.php

@@ -33,7 +33,20 @@ This package supports **3 isolation strategies**:
 
 ```bash
 composer require nuelcyoung/tenantable
+php spark tenants:install
 ```
+
+`tenants:install` is interactive on first run. It asks for the base domain, isolation mode, and identification strategy; then publishes `app/Config/Tenantable.php`, wires `app/Config/Filters.php` and `app/Config/Events.php` idempotently, scaffolds `app/Database/Migrations/Tenant/`, and runs `tenants:setup` to create the central tenants tables. Re-running it is safe.
+
+For non-interactive / CI installs:
+
+```bash
+php spark tenants:install --base-domain=example.com --mode=prefix --strategy=domain_or_subdomain --yes
+```
+
+Filter aliases (`tenant_subdomain`, `tenant_domain`, `tenant_domain_or_subdomain`, `tenant_path`, `tenant_request`, `tenant_security`, `identify_tenant`) are auto-registered through CI4's `Config\Registrar` discovery — you don't need to add them to `Config\Filters::$aliases` yourself.
+
+For the full step-by-step walkthrough, see [SETUP.md](SETUP.md).
 
 ---
 

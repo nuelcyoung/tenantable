@@ -1,0 +1,40 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Database\Migrations\Tenant;
+
+use CodeIgniter\Database\Migration;
+use nuelcyoung\tenantable\Services\TenantTableManager;
+
+/**
+ * Sample tenant migration scaffolded by `php spark tenants:install`.
+ *
+ * In `prefix` mode the table name resolves to `tenant_{id}_examples`.
+ * In `database` mode it stays as `examples` inside the tenant's own DB.
+ *
+ * Delete this file or model your own migrations after it.
+ */
+class CreateExampleTable extends Migration
+{
+    public function up(): void
+    {
+        $tableManager = TenantTableManager::getInstance();
+
+        $this->forge->addField([
+            'id'         => ['type' => 'INT', 'unsigned' => true, 'auto_increment' => true],
+            'name'       => ['type' => 'VARCHAR', 'constraint' => 255],
+            'created_at' => ['type' => 'DATETIME', 'null' => true],
+            'updated_at' => ['type' => 'DATETIME', 'null' => true],
+        ]);
+        $this->forge->addPrimaryKey('id');
+
+        $this->forge->createTable($tableManager->getTable('examples'));
+    }
+
+    public function down(): void
+    {
+        $tableManager = TenantTableManager::getInstance();
+        $this->forge->dropTable($tableManager->getTable('examples'), true);
+    }
+}

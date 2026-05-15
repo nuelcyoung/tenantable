@@ -11,23 +11,6 @@ use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
 use nuelcyoung\tenantable\Models\TenantModel;
 use nuelcyoung\tenantable\Services\TenantTableManager;
 
-/**
- * tenants:setup — provision database schema for the configured isolation mode.
- *
- * Modes:
- *   row       Shared DB with tenant_id column. Only creates the central tenants table.
- *   prefix    Shared DB with per-tenant table prefixes. Runs tenant migrations once
- *             per tenant with TenantTableManager seeded so table names resolve to
- *             tenant_{id}_*. Migration authors must reference tables via
- *             TenantTableManager::getInstance()->getTable('foo').
- *   database  Database-per-tenant. Optionally creates the DB, then runs tenant
- *             migrations against that connection.
- *
- * Usage:
- *   php spark tenants:setup
- *   php spark tenants:setup --mode=database --create-db
- *   php spark tenants:setup --tenants=1,3
- */
 class TenantsSetup extends BaseCommand
 {
     protected $group       = 'Tenantable';
@@ -42,7 +25,6 @@ class TenantsSetup extends BaseCommand
 
     public function run(array $params): void
     {
-        /** @var TenantableConfig $config */
         $config = config(TenantableConfig::class);
 
         $mode = $this->resolveMode($config);
@@ -70,7 +52,7 @@ class TenantsSetup extends BaseCommand
         $namespace = $config->tenantMigrationsNamespace;
         if (empty($namespace)) {
             CLI::error(
-                'Config\\Tenantable::$tenantMigrationsNamespace is not set. ' .
+                'Config\Tenantable::$tenantMigrationsNamespace is not set. ' .
                 'Set it to the PSR-4 namespace that holds your per-tenant migrations.'
             );
             return;
@@ -108,7 +90,6 @@ class TenantsSetup extends BaseCommand
 
     private function migrateCentral(): bool
     {
-        /** @var TenantableConfig $config */
         $config    = config(TenantableConfig::class);
         $tableName = $config->tenantsTable ?? 'tenants';
 
@@ -116,13 +97,12 @@ class TenantsSetup extends BaseCommand
 
         try {
             $runner = Services::migrations();
-            $runner->setNamespace('nuelcyoung\\tenantable')->latest();
+            $runner->setNamespace('nuelcyoung\tenantable')->latest();
         } catch (\Throwable $e) {
             CLI::error('  Failed: ' . $e->getMessage());
             return false;
         }
 
-        // Verify the table was actually created (catches stale migration history)
         $db = \Config\Database::connect();
         if (! $db->tableExists($tableName)) {
             CLI::error("  Migration reported success but the '{$tableName}' table does not exist.");
@@ -214,9 +194,6 @@ class TenantsSetup extends BaseCommand
         CLI::write('');
     }
 
-    /**
-     * Delegate to TenantDatabaseManager::createDatabase().
-     */
     private function createDatabase(array $tenant): bool
     {
         $db      = TenantModel::getDatabaseName($tenant);
@@ -231,10 +208,6 @@ class TenantsSetup extends BaseCommand
         return false;
     }
 
-    /**
-     * Register a temporary DB group pointing at the tenant's database, using the
-     * default group's credentials as the template. Only `database` is overridden.
-     */
     private function registerTenantGroup(array $tenant): string
     {
         $alias = $tenant['subdomain'] ?? ('tenant_' . $tenant['id']);
@@ -274,7 +247,6 @@ class TenantsSetup extends BaseCommand
 
             return $model->where('is_active', 1)->findAll();
         } catch (\Throwable $e) {
-            // Table may not exist yet (initial setup)
             return [];
         }
     }

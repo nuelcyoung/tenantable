@@ -10,17 +10,6 @@ use nuelcyoung\tenantable\Models\TenantModel;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
 use nuelcyoung\tenantable\Services\TenantDatabaseManager;
 
-/**
- * tenants:run — execute a Spark command in the context of each tenant.
- *
- * In database-per-tenant mode, migration commands run directly against
- * each tenant's database. Other commands run as subprocesses with the
- * TENANTABLE_TENANT_ID env variable set.
- *
- * Usage:
- *   php spark tenants:run migrate
- *   php spark tenants:run db:seed --seeder=TenantSeeder --tenants=1,3,5
- */
 class TenantsRun extends BaseCommand
 {
     protected $group       = 'Tenantable';
@@ -52,7 +41,6 @@ class TenantsRun extends BaseCommand
             return;
         }
 
-        /** @var TenantableConfig $config */
         $config = config(TenantableConfig::class);
         $mode   = $config->isolationMode
             ?? ($config->separateDatabasePerTenant ? 'database' : 'row');
@@ -95,9 +83,6 @@ class TenantsRun extends BaseCommand
         CLI::write('');
     }
 
-    /**
-     * Run tenant migrations directly against the tenant's database.
-     */
     protected function runMigrations(array $tenant, TenantableConfig $config): int
     {
         try {
@@ -135,9 +120,6 @@ class TenantsRun extends BaseCommand
         }
     }
 
-    /**
-     * Run a command as a shell subprocess with the tenant ID in env.
-     */
     protected function runAsSubprocess(int $tenantId, string $command, string $extraArgs): int
     {
         $exitCode  = 0;
@@ -162,9 +144,6 @@ class TenantsRun extends BaseCommand
         ], true);
     }
 
-    /**
-     * @return array<int, array>
-     */
     protected function resolveTenants(TenantModel $model): array
     {
         $idsOption = CLI::getOption('tenants');

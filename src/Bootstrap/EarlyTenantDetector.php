@@ -6,6 +6,9 @@ namespace nuelcyoung\tenantable\Bootstrap;
 
 use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Services\TenantTableManager;
+use nuelcyoung\tenantable\Services\TenantResolverCache;
+use nuelcyoung\tenantable\Exceptions\TenantNotFoundException;
+use nuelcyoung\tenantable\Exceptions\TenantInactiveException;
 
 /**
  * EarlyTenantDetector
@@ -33,53 +36,118 @@ class EarlyTenantDetector
             return;
         }
 
+        $config = self::getConfig();
+
+        // Check early detection strategy
+        $strategy = $config->earlyDetectionStrategy ?? 'domain_or_subdomain';
+        if ($strategy === 'off') {
+            return;
+        }
+
+        // Skip bypass routes (health probes, public APIs, etc) — they don't
+        // need tenant context and pre_system DB work is pure waste for them.
+        if (self::isBypassedRoute($config)) {
+            return;
+        }
+
         // Get host
         $host = $_SERVER['HTTP_HOST'] ?? '';
-        
-        if (empty($host)) {
+        $host = explode(':', (string) $host)[0]; // strip port
+
+        if ($host === '') {
+            return;
+        }
+
+        $manager = TenantManager::getInstance();
+
+        // Reject hosts not on the trusted allowlist before touching the
+        // cache or DB. The filter will render a 400 downstream — here we
+        // just bail out so we don't pollute the negative-cache with
+        // attacker-controlled hosts.
+        if (! $manager->isHostAllowed($host)) {
             return;
         }
 
         // Skip if localhost and not configured
-        if (self::isLocalhost($host)) {
-            $config = self::getConfig();
+        if ($manager->isLocalhost($host)) {
             if ($config->allowLocalhost ?? true) {
                 return;
             }
         }
 
-        // Extract subdomain
-        $subdomain = self::extractSubdomain($host);
-        
-        if ($subdomain === null) {
-            return;
-        }
-
         try {
-            // Set tenant early
-            $manager = TenantManager::getInstance();
-            $manager->setTenantBySubdomain($subdomain);
-            
+            $resolved = false;
+
+            // Try domain resolution first (if strategy allows)
+            if (in_array($strategy, ['domain', 'domain_or_subdomain'], true)) {
+                $resolved = self::resolveByDomain($host, $manager);
+            }
+
+            // Fall back to subdomain (if strategy allows and domain didn't resolve)
+            if (!$resolved && in_array($strategy, ['subdomain', 'domain_or_subdomain'], true)) {
+                $subdomain = $manager->extractSubdomain($host);
+                
+                if ($subdomain !== null) {
+                    $manager->setTenantBySubdomain($subdomain);
+                    $resolved = true;
+                }
+            }
+
+            if (!$resolved) {
+                return;
+            }
+
             // Bootstrap table manager if using prefix strategy
             $tableManager = TenantTableManager::getInstance();
             $tableManager->setTenant(
                 $manager->getTenantId(),
-                $subdomain
+                $manager->getSubdomain()
             );
-            
+
             // Now configure session path BEFORE session starts
             self::configureSession($manager->getTenantId());
-            
+
             // Configure cache prefix
             self::configureCache($manager->getTenantId());
-            
+
             // Configure storage paths
             self::configureStorage($manager->getTenantId());
             
+        } catch (TenantNotFoundException|TenantInactiveException $e) {
+            // pre_system runs BEFORE the filter pipeline — rethrowing would
+            // bypass BaseTenantFilter::handleNotFound/Inactive and surface a
+            // raw exception page. Clear any partial state and let the filter
+            // re-resolve and render the configured 404/403 view.
+            TenantManager::getInstance()->clear();
         } catch (\Throwable $e) {
-            // Log error but don't crash
+            // Generic safety net: log + abort early bootstrap, do not configure
+            TenantManager::getInstance()->clear();
             error_log("EarlyTenantDetector: {$e->getMessage()}");
         }
+    }
+
+    /**
+     * Resolve tenant by full custom domain using resolver cache.
+     */
+    protected static function resolveByDomain(string $host, TenantManager $manager): bool
+    {
+        $cache  = TenantResolverCache::getInstance();
+        $cached = $cache->resolveByHost($host);
+
+        if ($cached === null) {
+            return false;
+        }
+
+        if (!empty($cached['tenant']) && is_array($cached['tenant'])) {
+            $manager->setTenant($cached['tenant']);
+            return true;
+        }
+
+        if ($cached['is_active'] !== true) {
+            throw new TenantInactiveException("Tenant for domain '{$host}' is inactive");
+        }
+        $manager->setTenantById($cached['tenant_id']);
+        return true;
     }
 
     /**
@@ -152,63 +220,25 @@ class EarlyTenantDetector
     }
 
     /**
-     * Extract subdomain from host
+     * Match the current request URI against $bypassRoutes from config.
      */
-    protected static function extractSubdomain(string $host): ?string
+    protected static function isBypassedRoute($config): bool
     {
-        $config = self::getConfig();
-        $baseDomain = $config->baseDomain ?? 'localhost';
-        
-        // Remove port
-        $host = explode(':', $host)[0];
-        
-        // Check subdomain format
-        if (str_ends_with($host, $baseDomain)) {
-            $subdomain = rtrim(str_replace($baseDomain, '', $host), '.');
-            return $subdomain ?: null;
+        $patterns = $config->bypassRoutes ?? [];
+        if (empty($patterns)) {
+            return false;
         }
-        
-        // Multi-part domain
-        $parts = explode('.', $host);
-        if (count($parts) > 2) {
-            return $parts[0];
-        }
-        
-        return null;
-    }
 
-    /**
-     * Check if localhost
-     */
-    protected static function isLocalhost(string $host): bool
-    {
-        $patterns = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
-        
-        if (in_array($host, $patterns, true)) {
-            return true;
-        }
-        
-        if (str_starts_with($host, 'localhost:')) {
-            return true;
-        }
-        
-        if (preg_match('/\.(test|local|example)$/', $host)) {
-            $config      = self::getConfig();
-            $baseDomain  = $config->baseDomain ?? 'localhost';
-            
-            // Hosts under our configured baseDomain are legitimate tenant
-            if (! empty($baseDomain) && str_ends_with($host, $baseDomain)) {
-                return false;
+        $uri = $_SERVER['REQUEST_URI'] ?? '/';
+        $uri = parse_url($uri, PHP_URL_PATH) ?? '/';
+        $uri = ltrim((string) $uri, '/');
+
+        foreach ($patterns as $pattern) {
+            if (fnmatch((string) $pattern, $uri)) {
+                return true;
             }
-            
-            // The bare baseDomain itself (e.g. ci4.test) is also not localhost.
-            if ($host === $baseDomain) {
-                return false;
-            }
-            
-            return true;
         }
-        
+
         return false;
     }
 
@@ -224,6 +254,7 @@ class EarlyTenantDetector
             return new class {
                 public string $baseDomain = 'localhost';
                 public bool $allowLocalhost = true;
+                public string $earlyDetectionStrategy = 'domain_or_subdomain';
             };
         }
     }

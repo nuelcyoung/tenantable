@@ -8,24 +8,6 @@ use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
 
-/**
- * tenants:make-model — scaffold a tenant or global model class.
- *
- * Default target namespace is Config\Tenantable::$tenantModelsNamespace
- * (defaults to App\Models\Tenant). Override per-call with --namespace=,
- * or use --global to target $globalModelsNamespace (App\Models).
- *
- * Variants:
- *   default   extends nuelcyoung\tenantable\Models\TenantableModel  (row/tenant_id)
- *   --prefix  extends CodeIgniter\Model + TenantTablePrefixTrait    (per-tenant tables)
- *   --global  extends CodeIgniter\Model                              (non-tenant central table)
- *
- * Usage:
- *   php spark tenants:make-model Student
- *   php spark tenants:make-model Student --prefix --table=students
- *   php spark tenants:make-model Plan --global
- *   php spark tenants:make-model Student --namespace=App\Models\Tenancy
- */
 class TenantsMakeModel extends BaseCommand
 {
     protected $group       = 'Tenantable';
@@ -69,7 +51,6 @@ class TenantsMakeModel extends BaseCommand
             return;
         }
 
-        /** @var TenantableConfig $config */
         $config = config(TenantableConfig::class);
 
         $namespace = CLI::getOption('namespace');
@@ -85,7 +66,7 @@ class TenantsMakeModel extends BaseCommand
         $targetDir = $this->resolveNamespaceDir($namespace);
         if ($targetDir === null) {
             CLI::error("Could not resolve a directory for namespace '{$namespace}'.");
-            CLI::write('  Add it to Config\\Autoload::$psr4 (e.g. \'App\' => APPPATH).', 'yellow');
+            CLI::write('  Add it to Config\Autoload::$psr4 (e.g. \'App\' => APPPATH).', 'yellow');
             return;
         }
 
@@ -207,9 +188,6 @@ class TenantsMakeModel extends BaseCommand
         PHP;
     }
 
-    /**
-     * Resolve the filesystem directory for a PSR-4 namespace using Config\Autoload.
-     */
     private function resolveNamespaceDir(string $namespace): ?string
     {
         $autoload = config('Autoload');

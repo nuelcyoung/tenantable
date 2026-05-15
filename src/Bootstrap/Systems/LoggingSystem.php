@@ -6,10 +6,6 @@ namespace nuelcyoung\tenantable\Bootstrap\Systems;
 
 use nuelcyoung\tenantable\Bootstrap\TenantAwareInterface;
 
-/**
- * Injects tenant context into the logging environment so all log entries
- * emitted during a request carry the active tenant ID.
- */
 class LoggingSystem implements TenantAwareInterface
 {
     public function boot(?int $tenantId, ?array $tenant): void

@@ -46,23 +46,35 @@ abstract class BaseTenantFilter implements FilterInterface
             return;
         }
 
-        try {
-            $this->identify($request);
-        } catch (TenantNotFoundException $e) {
-            return $this->handleNotFound($request);
-        } catch (TenantInactiveException $e) {
-            return $this->handleInactive($request);
+        $host = $this->extractHost($request);
+
+        // #8 — Validate HTTP_HOST against allowlist
+        if (!$this->validateHost($host)) {
+            $response = service('response');
+            $response->setStatusCode(400);
+            return $response->setBody('Bad Request');
         }
 
-        if (!TenantManager::getInstance()->hasTenant()) {
-            return; // identification method found no tenant — not an error
+        $manager = TenantManager::getInstance();
+
+        // EarlyTenantDetector may have resolved the tenant in pre_system
+        // already. If so, skip identify() to avoid a duplicate DB query.
+        if (! $manager->hasTenant()) {
+            try {
+                $this->identify($request);
+            } catch (TenantNotFoundException $e) {
+                return $this->handleNotFound($request);
+            } catch (TenantInactiveException $e) {
+                return $this->handleInactive($request);
+            }
+
+            if (! $manager->hasTenant()) {
+                return; // identification method found no tenant — not an error
+            }
         }
 
-        // Boot all subsystems
         TenantBootstrap::getInstance()->initialize()->boot();
 
-        // Dispatch TenancyInitialized event
-        $manager = TenantManager::getInstance();
         \CodeIgniter\Events\Events::trigger('tenancyInitialized', new \nuelcyoung\tenantable\Events\TenancyInitialized(
             $manager->getTenantId(),
             $manager->getTenant()
@@ -126,6 +138,21 @@ abstract class BaseTenantFilter implements FilterInterface
             }
         }
         return false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Host validation (#8)
+    // -------------------------------------------------------------------------
+
+    protected function extractHost(RequestInterface $request): string
+    {
+        $host = $_SERVER['HTTP_HOST'] ?? $request->getServer('HTTP_HOST') ?? '';
+        return explode(':', (string) $host)[0];
+    }
+
+    protected function validateHost(string $host): bool
+    {
+        return TenantManager::getInstance()->isHostAllowed($host);
     }
 
     // -------------------------------------------------------------------------

@@ -8,14 +8,6 @@ use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Models\TenantModel;
 
-/**
- * tenants:list — display all tenants
- *
- * Usage:
- *   php spark tenants:list
- *   php spark tenants:list --active
- *   php spark tenants:list --inactive
- */
 class TenantsList extends BaseCommand
 {
     protected $group       = 'Tenantable';

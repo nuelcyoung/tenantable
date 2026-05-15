@@ -8,17 +8,6 @@ use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Models\TenantModel;
 
-/**
- * tenants:create — create a new tenant record.
- *
- * Inserts a tenant via TenantModel, which triggers auto-provisioning
- * (CREATE DATABASE + migrations) when database-per-tenant mode is active.
- *
- * Usage:
- *   php spark tenants:create foodblog "Food Blog"
- *   php spark tenants:create acme "Acme Corp" --domain=acme.com
- *   php spark tenants:create demo "Demo Tenant" --inactive
- */
 class TenantsCreate extends BaseCommand
 {
     protected $group       = 'Tenantable';
@@ -49,7 +38,6 @@ class TenantsCreate extends BaseCommand
 
         $model = new TenantModel();
 
-        // Check for duplicates
         if ($model->subdomainExists($subdomain)) {
             CLI::error("Subdomain '{$subdomain}' already exists.");
             return;
@@ -92,14 +80,12 @@ class TenantsCreate extends BaseCommand
             CLI::write("  Domain:    {$data['domain']}");
         }
 
-        // Check if auto-provisioning ran
         $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
         $mode   = $config->isolationMode ?? ($config->separateDatabasePerTenant ? 'database' : 'row');
 
         if ($mode === 'database') {
             CLI::write("  Database:  {$dbName}");
 
-            // Verify the database was created
             try {
                 $baseConfig             = (new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
                     $config->separateDatabasePerTenant,

@@ -4,22 +4,16 @@ declare(strict_types=1);
 
 namespace nuelcyoung\tenantable\Filters;
 
-use CodeIgniter\HTTP\RequestInterface;
-use nuelcyoung\tenantable\Services\TenantManager;
-
 /**
- * SubdomainFilter  (was TenantFilter)
+ * SubdomainFilter
  *
  * Identifies the tenant from the subdomain portion of the request host.
  *
  *   school.myapp.com  →  subdomain = 'school'
  *
- * Register as filter alias 'tenant' or 'tenant_subdomain'.
+ * @deprecated Use IdentifyTenant with strategy='subdomain' instead.
  */
-class SubdomainFilter extends BaseTenantFilter
+class SubdomainFilter extends IdentifyTenant
 {
-    protected function identify(RequestInterface $request): void
-    {
-        TenantManager::getInstance()->detectFromSubdomain();
-    }
+    protected string $strategy = 'subdomain';
 }

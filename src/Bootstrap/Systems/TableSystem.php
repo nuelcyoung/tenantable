@@ -7,10 +7,6 @@ namespace nuelcyoung\tenantable\Bootstrap\Systems;
 use nuelcyoung\tenantable\Bootstrap\TenantAwareInterface;
 use nuelcyoung\tenantable\Services\TenantTableManager;
 
-/**
- * Configures TenantTableManager with the current tenant, enabling
- * the table-prefix isolation strategy.
- */
 class TableSystem implements TenantAwareInterface
 {
     public function boot(?int $tenantId, ?array $tenant): void

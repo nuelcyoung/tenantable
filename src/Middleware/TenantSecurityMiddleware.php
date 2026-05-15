@@ -9,28 +9,11 @@ use CodeIgniter\HTTP\RequestInterface;
 use CodeIgniter\HTTP\ResponseInterface;
 use nuelcyoung\tenantable\Services\TenantManager;
 
-/**
- * TenantSecurityMiddleware
- *
- * Additional security layer that runs after TenantFilter:
- *   - Enforces tenant context is present
- *   - Validates POST/GET tenant_id fields against the resolved tenant (IDOR guard)
- *   - C-2 – Shuts down all TenantBootstrap systems at end of request
- *   - Clears bypass flags at end of request
- *
- * FIX 2.1 – Implements FilterInterface (was missing, causing type error).
- * FIX 2.2 – validateRequestTenantId() uses setGlobal() to actually apply sanitisation.
- * C-2     – after() calls TenantBootstrap::shutdown() to reset all subsystems.
- */
 class TenantSecurityMiddleware implements FilterInterface
 {
     protected array $exemptRoutes     = [];
     protected array $protectedFields  = ['tenant_id', 'school_id', 'org_id'];
     protected bool  $blockWithoutTenant = true;
-
-    // -------------------------------------------------------------------------
-    // FilterInterface
-    // -------------------------------------------------------------------------
 
     public function before(RequestInterface $request, $arguments = null)
     {
@@ -57,21 +40,12 @@ class TenantSecurityMiddleware implements FilterInterface
             return;
         }
 
-        // FIX 2.2 – Actually neutralise tampered tenant_id fields
         $this->validateRequestTenantId($request, $manager->getTenantId());
     }
 
-    /**
-     * C-2 – Shut down TenantBootstrap systems and clear bypass flags.
-     */
     public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
     {
-        // Late teardown is handled by PackageEvents::register() on post_system.
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     protected function isExempt(string $uri): bool
     {
@@ -106,12 +80,6 @@ class TenantSecurityMiddleware implements FilterInterface
         return false;
     }
 
-    /**
-     * FIX 2.2 – Strip tampered tenant_id fields from POST/GET.
-     *
-     * Original code mutated local array copies (zero effect on the request).
-     * Now uses setGlobal() so subsequent getPost()/getGet() return clean data.
-     */
     protected function validateRequestTenantId(RequestInterface $request, int $tenantId): void
     {
         $post    = $request->getPost() ?? [];

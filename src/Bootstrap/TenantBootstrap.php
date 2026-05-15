@@ -6,31 +6,9 @@ namespace nuelcyoung\tenantable\Bootstrap;
 
 use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Services\TenantTableManager;
-use nuelcyoung\tenantable\Events\TenancyInitialized;
-use nuelcyoung\tenantable\Events\TenancyEnded;
-use CodeIgniter\Events\Events;
 
-/**
- * TenantBootstrap
- *
- *
- * Usage (automatic — wired into TenantFilter):
- *   TenantBootstrap::getInstance()->initialize()->boot();
- *
- * Manual usage (e.g., CLI commands):
- *   TenantBootstrap::getInstance()
- *       ->initialize()
- *       ->bootForTenant($tenantId);
- *
- * Systems are now registered from Config\Tenantable::$bootstrappers
- * Added $bootErrors[] + wasSuccessful() so callers can detect failures.
- */
 class TenantBootstrap
 {
-    // -------------------------------------------------------------------------
-    // Singleton
-    // -------------------------------------------------------------------------
-
     private static ?self $instance = null;
 
     public static function getInstance(): self
@@ -47,36 +25,15 @@ class TenantBootstrap
         self::$instance = null;
     }
 
-    // -------------------------------------------------------------------------
-    // State
-    // -------------------------------------------------------------------------
-
     /** @var array<string, TenantAwareInterface> */
     protected array $systems = [];
 
-    /** Last tenant ID that was booted (to detect changes) */
     protected ?int $lastTenantId = null;
-
-    /** Whether initialize() has run */
     protected bool $initialized = false;
 
-    /**
-     * Errors collected during last boot() call.
-     * @var array<string, string>  [systemName => errorMessage]
-     */
+    /** @var array<string, string> */
     protected array $bootErrors = [];
 
-    // -------------------------------------------------------------------------
-    // Initialization
-    // -------------------------------------------------------------------------
-
-    /**
-     * Register all configured systems and mark as initialized.
-     *
-     * Reads bootstrappers from Config\Tenantable::$bootstrappers so the
-     *        developer can remove systems they don't need (e.g., SessionSystem
-     *        when using JWT, StorageSystem when using S3).
-     */
     public function initialize(): self
     {
         if ($this->initialized) {
@@ -98,12 +55,6 @@ class TenantBootstrap
         return $this;
     }
 
-    /**
-     * Read the bootstrapper list from Config\Tenantable.
-     * Falls back to the full default set if config is unavailable.
-     *
-     * @return array<string, class-string<TenantAwareInterface>|TenantAwareInterface>
-     */
     protected function resolveBootstrappers(): array
     {
         $defaults = [
@@ -123,15 +74,10 @@ class TenantBootstrap
                 return $config->bootstrappers;
             }
         } catch (\Throwable $e) {
-            // Config unavailable – use defaults
         }
 
         return $defaults;
     }
-
-    // -------------------------------------------------------------------------
-    // System registry
-    // -------------------------------------------------------------------------
 
     public function registerSystem(string $name, TenantAwareInterface $system): self
     {
@@ -150,27 +96,18 @@ class TenantBootstrap
         return $this->systems[$name] ?? null;
     }
 
-    /** @return array<string, TenantAwareInterface> */
     public function getSystems(): array
     {
         return $this->systems;
     }
 
-    // -------------------------------------------------------------------------
-    // Boot / Shutdown
-    // -------------------------------------------------------------------------
-
-    /**
-     * Boot all registered systems for the current tenant.
-     * Skips if the tenant hasn't changed since the last boot.
-     */
     public function boot(): void
     {
         $tenantId = TenantManager::getInstance()->getTenantId();
         $tenant   = TenantManager::getInstance()->getTenant();
 
         if ($tenantId === $this->lastTenantId) {
-            return; // Tenant unchanged – nothing to do
+            return;
         }
 
         $this->lastTenantId = $tenantId;
@@ -180,7 +117,6 @@ class TenantBootstrap
             try {
                 $system->boot($tenantId, $tenant);
             } catch (\Throwable $e) {
-                // M-3 – Collect errors; log them; do not silently discard
                 $this->bootErrors[$name] = $e->getMessage();
                 log_message('error', "TenantBootstrap: System '{$name}' failed to boot: {$e->getMessage()}", [
                     'exception' => $e,
@@ -188,43 +124,15 @@ class TenantBootstrap
                 ]);
             }
         }
-
-        // Dispatch TenancyInitialized after all systems have booted
-        if ($tenantId !== null) {
-            Events::trigger('tenancyInitialized', new TenancyInitialized($tenantId, $tenant ?? []));
-        }
     }
 
-    /**
-     * Boot all systems for a specific tenant ID (useful in CLI/queue context).
-     */
     public function bootForTenant(int $tenantId): void
     {
         TenantManager::getInstance()->setTenantById($tenantId);
-        $this->lastTenantId = null; // Force re-boot even if same ID
+        $this->lastTenantId = null;
         $this->boot();
     }
 
-    /**
-     * Run a callable in central (no-tenant) context, then restore the previous
-     * tenant context.
-     *
-     * Useful when, inside a tenant request, you need to query a global table
-     * (e.g. the `tenants` table itself, or a central plans/users table) without
-     * the tenant DB swap or tenant scopes interfering.
-     *
-     * The previous tenant is restored via bootForTenant() even if $callback
-     * throws. If no tenant is currently active, $callback runs without any
-     * swap.
-     *
-     * Note: this is a scoped swap, not a lifecycle event — it does not fire
-     * TenancyEnded / TenancyInitialized. Listeners that perform cleanup on
-     * those events stay quiet during the swap.
-     *
-     * @template T
-     * @param callable(): T $callback
-     * @return T
-     */
     public function runCentral(callable $callback): mixed
     {
         $tenantManager    = TenantManager::getInstance();
@@ -240,7 +148,7 @@ class TenantBootstrap
             try {
                 $system->boot(null, null);
             } catch (\Throwable $e) {
-                log_message('error', "TenantBootstrap::runCentral: '{$name}' failed to switch to central: {$e->getMessage()}", [
+                log_message('error', "TenantBootstrap::runCentral: '{$name}' failed: {$e->getMessage()}", [
                     'exception' => $e,
                 ]);
             }
@@ -256,16 +164,14 @@ class TenantBootstrap
     }
 
     /**
-     * Shutdown all systems and clear tenant context.
+     * Shutdown all systems.
+     *
+     * Note: The TenancyEnded event should be dispatched BEFORE calling
+     * this method so listeners can access tenant state before systems
+     * are torn down.
      */
     public function shutdown(): void
     {
-        // Dispatch TenancyEnded BEFORE systems shut down
-        Events::trigger('tenancyEnded', new TenancyEnded(
-            $this->lastTenantId,
-            TenantManager::getInstance()->getTenant()
-        ));
-
         foreach ($this->systems as $name => $system) {
             try {
                 $system->shutdown();
@@ -278,10 +184,6 @@ class TenantBootstrap
         $this->bootErrors   = [];
     }
 
-    /**
-     * Check current tenant ID; re-boot if it has changed.
-     * Useful as a guard in long-running processes.
-     */
     public function checkAndBoot(): void
     {
         $currentTenantId = TenantManager::getInstance()->getTenantId();
@@ -291,23 +193,11 @@ class TenantBootstrap
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Boot result inspection
-    // -------------------------------------------------------------------------
-
-    /**
-     * Whether all systems booted without errors on the last boot() call.
-     */
     public function wasSuccessful(): bool
     {
         return empty($this->bootErrors);
     }
 
-    /**
-     * Get errors from the last boot() call.
-     *
-     * @return array<string, string>  [systemName => errorMessage]
-     */
     public function getBootErrors(): array
     {
         return $this->bootErrors;

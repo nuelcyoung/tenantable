@@ -1,32 +1,10 @@
 <?php
 
-/**
- * Tenantable Helper Functions
- *
- * Provides convenient global helper functions for working with the current tenant.
- *
- * FIX 1.5 – Removed the `namespace` declaration that was present in the original
- *            file. PHP helper functions must live in the GLOBAL namespace to be
- *            callable as tenant_id(), tenant(), etc. Without this fix, every
- *            helper call would result in "function not found" because the functions
- *            were registered under nuelcyoung\tenantable\Helpers\ instead.
- *
- * FIX 3.5 – tenant_url() now respects the scheme (http vs https) from the
- *            application's baseURL instead of always forcing https://.
- */
-
 declare(strict_types=1);
 
 use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
 use nuelcyoung\tenantable\Services\TenantManager;
 
-// -------------------------------------------------------------------------
-// FIX 1.5 – All functions in global namespace (no namespace declaration above)
-// -------------------------------------------------------------------------
-
-/**
- * Get the current tenant ID.
- */
 if (!function_exists('tenant_id')) {
     function tenant_id(): ?int
     {
@@ -38,9 +16,6 @@ if (!function_exists('tenant_id')) {
     }
 }
 
-/**
- * Get the current tenant data array.
- */
 if (!function_exists('tenant')) {
     function tenant(): ?array
     {
@@ -52,9 +27,6 @@ if (!function_exists('tenant')) {
     }
 }
 
-/**
- * Check whether a tenant context is set for the current request.
- */
 if (!function_exists('has_tenant')) {
     function has_tenant(): bool
     {
@@ -66,9 +38,6 @@ if (!function_exists('has_tenant')) {
     }
 }
 
-/**
- * Get the current tenant's subdomain.
- */
 if (!function_exists('tenant_subdomain')) {
     function tenant_subdomain(): ?string
     {
@@ -80,15 +49,6 @@ if (!function_exists('tenant_subdomain')) {
     }
 }
 
-/**
- * Generate a URL for the given path under the tenant's subdomain.
- *
- * FIX 3.5 – Scheme (http vs https) is now derived from the application's
- *            baseURL instead of always hardcoding "https://".
- *
- * @param string|null $path      Relative URL path (e.g., 'dashboard')
- * @param string|null $subdomain Override the subdomain (defaults to current tenant)
- */
 if (!function_exists('tenant_url')) {
     function tenant_url(?string $path = '', ?string $subdomain = null): string
     {
@@ -100,37 +60,17 @@ if (!function_exists('tenant_url')) {
 
         $tenantConfig = config(\nuelcyoung\tenantable\Config\Tenantable::class);
 
-        // FIX 3.5 – Detect scheme from App baseURL
         $baseUrl = config(\Config\App::class)->baseURL ?? 'http://localhost';
         $scheme  = str_starts_with($baseUrl, 'https://') ? 'https' : 'http';
 
         $baseDomain = $tenantConfig->baseDomain ?? 'localhost';
 
-        // Normalise path – remove leading slash to avoid double-slashes
         $path = ltrim((string) $path, '/');
 
         return "{$scheme}://{$subdomain}.{$baseDomain}/{$path}";
     }
 }
 
-/**
- * Run a callable in central (no-tenant) context, then restore the previous
- * tenant context.
- *
- * Useful in DB-per-tenant mode when you need to query a central table from
- * inside a tenant request without writing the full
- * TenantBootstrap::getInstance()->runCentral(...) chain.
- *
- * Restores the previous tenant even if $callback throws. No-op when no tenant
- * is currently active.
- *
- * Example:
- *   $plan = central(fn () => (new \App\Models\PlanModel())->find($planId));
- *
- * @template T
- * @param callable(): T $callback
- * @return T
- */
 if (!function_exists('central')) {
     function central(callable $callback): mixed
     {
@@ -138,10 +78,30 @@ if (!function_exists('central')) {
     }
 }
 
-/**
- * Check whether the currently authenticated user can bypass tenant filtering
- * (i.e., is a superadmin).
- */
+if (!function_exists('tenancy_run')) {
+    function tenancy_run(int $tenantId, callable $callback): mixed
+    {
+        $manager    = TenantManager::getInstance();
+        $bootstrap  = TenantBootstrap::getInstance();
+
+        try {
+            $manager->setTenantById($tenantId);
+            $bootstrap->initialize()->boot();
+
+            return $callback();
+        } finally {
+            if ($manager->hasTenant()) {
+                \CodeIgniter\Events\Events::trigger('tenancyEnded', new \nuelcyoung\tenantable\Events\TenancyEnded(
+                    $manager->getTenantId(),
+                    $manager->getTenant()
+                ));
+            }
+            $bootstrap->shutdown();
+            $manager->clear();
+        }
+    }
+}
+
 if (!function_exists('can_bypass_tenant')) {
     function can_bypass_tenant(): bool
     {

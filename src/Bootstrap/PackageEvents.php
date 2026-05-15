@@ -8,7 +8,11 @@ use CodeIgniter\Config\Factories;
 use CodeIgniter\Events\Events;
 use nuelcyoung\tenantable\Models\TenantableModel;
 use nuelcyoung\tenantable\Services\TenantManager;
+use nuelcyoung\tenantable\Services\TenantResolverCache;
 use nuelcyoung\tenantable\Support\TenantContextState;
+use nuelcyoung\tenantable\Events\TenancyEnded;
+use nuelcyoung\tenantable\Exceptions\TenantNotFoundException;
+use nuelcyoung\tenantable\Exceptions\TenantInactiveException;
 
 final class PackageEvents
 {
@@ -25,6 +29,7 @@ final class PackageEvents
         self::registerConfigOverride();
         self::registerWebHooks();
         self::registerCliHooks();
+        self::registerCacheInvalidation();
     }
 
     private static function registerConfigOverride(): void
@@ -43,6 +48,7 @@ final class PackageEvents
         Events::on('pre_system', static function (): void {
             if (PHP_SAPI !== 'cli') {
                 TenantManager::getInstance()->clear();
+                TenantResolverCache::resetInstance(); // drop per-request version memo
             }
         }, 0);
 
@@ -53,9 +59,22 @@ final class PackageEvents
                 return;
             }
 
+            $manager = TenantManager::getInstance();
+
+            // Dispatch TenancyEnded BEFORE shutdown
+            if ($manager->hasTenant()) {
+                Events::trigger('tenancyEnded', new TenancyEnded(
+                    $manager->getTenantId(),
+                    $manager->getTenant()
+                ));
+            }
+
             TenantBootstrap::getInstance()->shutdown();
             TenantableModel::disableTenantBypass();
             TenantContextState::disableTenantBypass();
+
+            // Clear tenant manager but keep baseDomain
+            $manager->clear();
         });
     }
 
@@ -68,15 +87,57 @@ final class PackageEvents
         $subdomain = getenv('TENANT_SUBDOMAIN') ?: null;
 
         if ($subdomain) {
-            TenantManager::getInstance()->setTenantBySubdomain($subdomain);
-            TenantBootstrap::getInstance()->initialize()->boot();
+            try {
+                TenantManager::getInstance()->setTenantBySubdomain($subdomain);
+                TenantBootstrap::getInstance()->initialize()->boot();
+            } catch (TenantNotFoundException|TenantInactiveException $e) {
+                fwrite(STDERR, "Tenantable: TENANT_SUBDOMAIN={$subdomain} — {$e->getMessage()}\n");
+            }
         }
 
         $tenantId = getenv('TENANTABLE_TENANT_ID') ?: null;
 
         if ($tenantId) {
-            TenantManager::getInstance()->setTenantById((int) $tenantId);
-            TenantBootstrap::getInstance()->initialize()->boot();
+            try {
+                TenantManager::getInstance()->setTenantById((int) $tenantId);
+                TenantBootstrap::getInstance()->initialize()->boot();
+            } catch (TenantNotFoundException|TenantInactiveException $e) {
+                fwrite(STDERR, "Tenantable: TENANTABLE_TENANT_ID={$tenantId} — {$e->getMessage()}\n");
+            }
         }
+    }
+
+    private static function registerCacheInvalidation(): void
+    {
+        Events::on('tenantCreated', static function (): void {
+            TenantResolverCache::getInstance()->flush();
+        });
+
+        Events::on('tenantUpdated', static function ($event): void {
+            $cache = TenantResolverCache::getInstance();
+            $cache->flush();
+
+            // Belt-and-suspenders: also flush the old domain key if the
+            // tenant's domain column changed (covers any per-host caches
+            // beyond the version-keyed resolver cache).
+            $oldDomain = $event->before['domain'] ?? null;
+            $newDomain = $event->tenant['domain'] ?? null;
+            if (!empty($oldDomain) && $oldDomain !== $newDomain) {
+                $cache->flushHost((string) $oldDomain);
+            }
+        });
+
+        Events::on('tenantDeleted', static function (): void {
+            TenantResolverCache::getInstance()->flush();
+        });
+
+        Events::on('tenantDomainChanged', static function ($event): void {
+            $cache = TenantResolverCache::getInstance();
+            $cache->flush();
+
+            if (!empty($event->data['_previous_domain'])) {
+                $cache->flushHost((string) $event->data['_previous_domain']);
+            }
+        });
     }
 }

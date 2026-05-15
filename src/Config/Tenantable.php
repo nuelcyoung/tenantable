@@ -103,7 +103,7 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
      *       Identifies by subdomain: acme.example.com → tenant "acme"
      *
      *   'tenant_domain'              → DomainFilter
-     *       Identifies by custom domain stored in tenants.domain column
+     *       Identifies by custom domain stored in tenant_domains table
      *
      *   'tenant_domain_or_subdomain' → DomainOrSubdomainFilter
      *       Tries domain first, falls back to subdomain
@@ -129,6 +129,12 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
      */
     public string $identificationMethod = 'tenant_subdomain';
 
+    /**
+     * Default resolution strategy for IdentifyTenant filter.
+     * One of: 'domain', 'subdomain', 'domain_or_subdomain', 'request_data', 'path'
+     */
+    public string $defaultStrategy = 'domain_or_subdomain';
+
     public array $superadminGroups = ['superadmin'];
 
     public bool $tenantFilteringEnabled = true;
@@ -146,8 +152,37 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
     public ?int $fallbackTenantId = null;
     public bool $allowLocalhost   = true;
 
+    /**
+     * Development tenant ID to auto-activate when request comes from localhost.
+     * When null, localhost requests proceed without tenant context (no 404).
+     */
+    public ?int $developmentTenantId = null;
+
     public bool $cacheTenantData = true;
     public int  $cacheTtl        = 3600;
+
+    /**
+     * Cache TTL for domain-to-tenant resolver (seconds).
+     */
+    public int $resolverCacheTtl = 300;
+
+    /**
+     * Cache key prefix for resolver cache.
+     */
+    public string $resolverCachePrefix = 'tenant_resolver';
+
+    /**
+     * Early detection strategy for pre_system bootstrap.
+     * One of: 'subdomain', 'domain', 'domain_or_subdomain', 'off'
+     */
+    public string $earlyDetectionStrategy = 'domain_or_subdomain';
+
+    /**
+     * Trusted host patterns for HTTP_HOST validation.
+     * Supports wildcards: ['*.app.test', 'app.test']
+     * Set to null to disable validation (not recommended).
+     */
+    public ?array $trustedHostPatterns = null;
 
     public array $bootstrappers = [
         'database' => \nuelcyoung\tenantable\Bootstrap\Systems\DatabaseSystem::class,
@@ -174,6 +209,7 @@ class Tenantable extends \CodeIgniter\Config\BaseConfig
             'tenant_domain_or_subdomain' => \nuelcyoung\tenantable\Filters\DomainOrSubdomainFilter::class,
             'tenant_path'                => \nuelcyoung\tenantable\Filters\PathFilter::class,
             'tenant_request'             => \nuelcyoung\tenantable\Filters\RequestDataFilter::class,
+            'identify_tenant'            => \nuelcyoung\tenantable\Filters\IdentifyTenant::class,
         ];
     }
 

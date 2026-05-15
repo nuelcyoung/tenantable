@@ -8,20 +8,6 @@ use nuelcyoung\tenantable\Events\TenantCreated;
 use nuelcyoung\tenantable\Events\TenantUpdated;
 use nuelcyoung\tenantable\Events\TenantDeleted;
 
-/**
- * TenantModel
- *
- * Manages tenant records in the database and fires lifecycle events
- * that the application can subscribe to for provisioning/cleanup.
- *
- * Lifecycle Events:
- *   tenantCreated   → TenantCreated   (provision tables, storage dirs, etc.)
- *   tenantUpdated   → TenantUpdated   (react to plan/subdomain/status changes)
- *   tenantDeleted   → TenantDeleted   (delete tables, wipe files, etc.)
- *
- * FIX 3.3 – updateSettings() passes plain array; ORM cast handles JSON.
- * FIX 3.4 – Removed dead $deletedField = 'deleted_at'.
- */
 class TenantModel extends GlobalModel
 {
     protected $table            = 'tenants';
@@ -33,7 +19,7 @@ class TenantModel extends GlobalModel
     protected $allowedFields    = [
         'subdomain',
         'name',
-        'domain',             // For DomainFilter / DomainOrSubdomainFilter
+        'domain',
         'is_active',
         'settings',
     ];
@@ -42,7 +28,7 @@ class TenantModel extends GlobalModel
     protected bool $updateOnlyChanged  = true;
 
     protected array $casts = [
-        'is_active' => '?boolean',
+        'is_active' => 'boolean',
         'settings'  => '?array',
     ];
 
@@ -83,33 +69,15 @@ class TenantModel extends GlobalModel
     protected $beforeDelete   = ['captureBeforeDelete'];
     protected $afterDelete    = ['dispatchDeleted'];
 
-    /**
-     * Snapshot of tenant data stored before an update (for TenantUpdated event).
-     * @var array<int, array>  [id => oldData]
-     */
     private array $beforeUpdateSnapshots = [];
-
-    /**
-     * Snapshot of tenant data stored before a delete (for TenantDeleted event).
-     * @var array<int, array>  [id => rowData]
-     */
     private array $beforeDeleteSnapshots = [];
 
-    // -------------------------------------------------------------------------
-    // Lifecycle event callbacks
-    // -------------------------------------------------------------------------
-
-    /**
-     * Fire TenantCreated after a successful insert and auto-provision the
-     * tenant database when database-per-tenant isolation is configured.
-     */
     protected function dispatchCreated(array $data): array
     {
         if (!empty($data['id'])) {
             $tenant = $this->find((int) $data['id']);
 
             if ($tenant !== null) {
-                // Auto-provision: create DB + run migrations (if configured)
                 $config  = config(\nuelcyoung\tenantable\Config\Tenantable::class);
                 $manager = new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
                     $config->separateDatabasePerTenant,
@@ -127,9 +95,6 @@ class TenantModel extends GlobalModel
         return $data;
     }
 
-    /**
-     * Snapshot the current tenant data before it is overwritten by the update.
-     */
     protected function captureBeforeUpdate(array $data): array
     {
         if (!empty($data['id'])) {
@@ -142,9 +107,6 @@ class TenantModel extends GlobalModel
         return $data;
     }
 
-    /**
-     * Fire TenantUpdated after a successful update.
-     */
     protected function dispatchUpdated(array $data): array
     {
         if (!empty($data['id'])) {
@@ -153,7 +115,6 @@ class TenantModel extends GlobalModel
             $before = $this->beforeUpdateSnapshots[$id] ?? [];
 
             if ($tenant !== null) {
-                // Diff to expose only what actually changed
                 $changed = array_diff_assoc(
                     array_intersect_key($tenant, $data['data'] ?? []),
                     $before
@@ -162,7 +123,8 @@ class TenantModel extends GlobalModel
                 \CodeIgniter\Events\Events::trigger('tenantUpdated', new TenantUpdated(
                     $id,
                     $tenant,
-                    $changed
+                    $changed,
+                    $before
                 ));
             }
 
@@ -172,9 +134,6 @@ class TenantModel extends GlobalModel
         return $data;
     }
 
-    /**
-     * Snapshot the tenant row before deletion so TenantDeleted has the data.
-     */
     protected function captureBeforeDelete(array $data): array
     {
         if (!empty($data['id'])) {
@@ -187,9 +146,6 @@ class TenantModel extends GlobalModel
         return $data;
     }
 
-    /**
-     * Fire TenantDeleted after a successful delete.
-     */
     protected function dispatchDeleted(array $data): array
     {
         if (!empty($data['id'])) {
@@ -204,11 +160,6 @@ class TenantModel extends GlobalModel
         return $data;
     }
 
-    // -------------------------------------------------------------------------
-    // Query helpers
-    // -------------------------------------------------------------------------
-
-    /** @return array<int, array> */
     public function getActiveTenants(): array
     {
         return $this->where('is_active', true)->findAll();
@@ -235,15 +186,11 @@ class TenantModel extends GlobalModel
         return $builder->countAllResults() > 0;
     }
 
-    /** Back-compat alias — ORM cast decodes 'settings' on every find() now. */
     public function findWithSettings(int $id): ?array
     {
         return $this->find($id);
     }
 
-    /**
-     * FIX 3.3 – Pass plain array; ORM 'array' cast handles serialisation.
-     */
     public function updateSettings(int $id, array $settings): bool
     {
         return $this->update($id, ['settings' => $settings]);
@@ -254,12 +201,6 @@ class TenantModel extends GlobalModel
         return $tenant['name'] ?? $tenant['subdomain'] ?? 'Unknown';
     }
 
-    /**
-     * Derive the database name for a tenant using the configured generator.
-     *
-     * Falls back to the convention "tenant_{id}" when no custom generator
-     * is set in Config\Tenantable::$databaseNameGenerator.
-     */
     public static function getDatabaseName(array $tenant): string
     {
         $config    = config(\nuelcyoung\tenantable\Config\Tenantable::class);
@@ -269,7 +210,6 @@ class TenantModel extends GlobalModel
             return $generator($tenant);
         }
 
-        // Default convention: tenant_{id}
         return 'tenant_' . $tenant['id'];
     }
 }

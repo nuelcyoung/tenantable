@@ -8,17 +8,6 @@ use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
 
-/**
- * tenants:make-migration — scaffold a tenant migration file.
- *
- * Creates a timestamped migration class in the directory mapped to
- * Config\Tenantable::$tenantMigrationsNamespace (default: App\Database\Migrations\Tenant).
- *
- * Usage:
- *   php spark tenants:make-migration CreateUsersTable
- *   php spark tenants:make-migration AddStatusToOrders --table=orders
- *   php spark tenants:make-migration CreateProductsTable --namespace=App\Database\Migrations\Tenant
- */
 class TenantsMakeMigration extends BaseCommand
 {
     protected $group       = 'Tenantable';
@@ -30,7 +19,7 @@ class TenantsMakeMigration extends BaseCommand
     ];
     protected $options = [
         '--table'     => 'Table name to reference in the migration stub.',
-        '--namespace' => 'Override the target namespace (default: Config\Tenantable::$tenantMigrationsNamespace).',
+        '--namespace' => 'Override the target namespace.',
         '--force'     => 'Overwrite the file if it already exists.',
     ];
 
@@ -49,7 +38,6 @@ class TenantsMakeMigration extends BaseCommand
             return;
         }
 
-        /** @var TenantableConfig $config */
         $config    = config(TenantableConfig::class);
         $namespace = CLI::getOption('namespace');
 
@@ -60,7 +48,7 @@ class TenantsMakeMigration extends BaseCommand
         if (empty($namespace)) {
             CLI::error(
                 'No tenant migrations namespace configured.' . PHP_EOL .
-                '  Set Config\\Tenantable::$tenantMigrationsNamespace or pass --namespace=.'
+                '  Set Config\Tenantable::$tenantMigrationsNamespace or pass --namespace=.'
             );
             return;
         }
@@ -74,7 +62,7 @@ class TenantsMakeMigration extends BaseCommand
         $targetDir = $this->resolveNamespaceDir($namespace);
         if ($targetDir === null) {
             CLI::error("Could not resolve a directory for namespace '{$namespace}'.");
-            CLI::write('  Add it to Config\\Autoload::$psr4 (e.g. \'App\' => APPPATH).', 'yellow');
+            CLI::write('  Add it to Config\Autoload::$psr4 (e.g. \'App\' => APPPATH).', 'yellow');
             return;
         }
 
@@ -106,9 +94,6 @@ class TenantsMakeMigration extends BaseCommand
         CLI::write('');
     }
 
-    /**
-     * Render the migration class template.
-     */
     private function renderTemplate(string $namespace, string $className, string $table): string
     {
         return <<<PHP
@@ -154,32 +139,19 @@ class TenantsMakeMigration extends BaseCommand
         PHP;
     }
 
-    /**
-     * Guess table name from the migration class name.
-     *
-     * CreateUsersTable    → users
-     * AddStatusToOrders   → orders
-     * CreateProductImages → product_images
-     */
     private function guessTable(string $name): string
     {
-        // Try "Create{X}Table" pattern
         if (preg_match('/^Create(.+?)(?:Table)?$/i', $name, $m)) {
             return $this->snakeCase($m[1]);
         }
 
-        // Try "Add{X}To{Table}" or "Remove{X}From{Table}" patterns
         if (preg_match('/(?:To|From)([A-Z][A-Za-z0-9]+)$/i', $name, $m)) {
             return $this->snakeCase($m[1]);
         }
 
-        // Fallback: snake_case the whole name
         return $this->snakeCase($name);
     }
 
-    /**
-     * Resolve the filesystem directory for a PSR-4 namespace.
-     */
     private function resolveNamespaceDir(string $namespace): ?string
     {
         $autoload = config('Autoload');

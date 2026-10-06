@@ -39,9 +39,7 @@ class BootstrapSystemsTest extends TestCase
         parent::tearDown();
     }
 
-    // =========================================================================
     // TenantBootstrap Tests
-    // =========================================================================
 
     public function testBootstrapIsSingleton(): void
     {
@@ -99,9 +97,7 @@ class BootstrapSystemsTest extends TestCase
         $this->assertNull($bootstrap->getSystem('custom'));
     }
 
-    // =========================================================================
     // CacheSystem Tests
-    // =========================================================================
 
     public function testCacheSystemSetsPrefix(): void
     {
@@ -135,9 +131,7 @@ class BootstrapSystemsTest extends TestCase
         $this->assertTrue(true);
     }
 
-    // =========================================================================
     // StorageSystem Tests
-    // =========================================================================
 
     public function testStorageSystemIsTenantAware(): void
     {
@@ -163,9 +157,7 @@ class BootstrapSystemsTest extends TestCase
         $this->assertStringContainsString('tenant_default', $path);
     }
 
-    // =========================================================================
     // LoggingSystem Tests
-    // =========================================================================
 
     public function testLoggingSystemSetsEnvVariable(): void
     {
@@ -204,9 +196,7 @@ class BootstrapSystemsTest extends TestCase
         $this->assertArrayNotHasKey('TENANT_LOG_CONTEXT', $_ENV);
     }
 
-    // =========================================================================
     // ConfigSystem Tests
-    // =========================================================================
 
     public function testConfigSystemIsTenantAware(): void
     {
@@ -280,9 +270,7 @@ class BootstrapSystemsTest extends TestCase
         $configSystem->shutdown();
     }
 
-    // =========================================================================
     // Boot Sequence Tests
-    // =========================================================================
 
     public function testBootCallsAllSystems(): void
     {
@@ -316,7 +304,7 @@ class BootstrapSystemsTest extends TestCase
         $bootstrap->boot();
 
         // Verify boot was called by checking it doesn't boot again
-        // (the mock expects once() which means boot was called)
+        // (the mock expects a single invocation, confirming boot was called)
     }
 
     public function testShutdownCallsAllSystems(): void
@@ -348,5 +336,30 @@ class BootstrapSystemsTest extends TestCase
         // Boot twice with same tenant (should only run once)
         $bootstrap->boot();
         $bootstrap->boot();
+    }
+
+    public function testBootFailureRollsBackAndClearsTenantContext(): void
+    {
+        $manager = TenantManager::getInstance();
+        $reflection = new \ReflectionClass($manager);
+        $tenantId = $reflection->getProperty('tenantId');
+        $tenantId->setAccessible(true);
+        $tenantId->setValue($manager, 1);
+
+        $failing = $this->createMock(TenantAwareInterface::class);
+        $failing->expects($this->once())
+            ->method('boot')
+            ->willThrowException(new \RuntimeException('database unavailable'));
+
+        $bootstrap = TenantBootstrap::getInstance();
+        $bootstrap->registerSystem('failing', $failing);
+
+        try {
+            $bootstrap->boot();
+            $this->fail('Expected bootstrap failure.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('unable to initialize tenant context', $e->getMessage());
+            $this->assertNull($manager->getTenantId());
+        }
     }
 }

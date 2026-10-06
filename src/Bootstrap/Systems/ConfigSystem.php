@@ -37,8 +37,12 @@ class ConfigSystem implements TenantAwareInterface
                     $this->originalBaseURL = $appConfig->baseURL;
                 }
 
-                $baseDomain  = $manager->getBaseDomain();
-                $parsed      = parse_url($appConfig->baseURL);
+                $baseDomain  = $manager->getBaseDomainForHost(
+                    $_SERVER['HTTP_HOST'] ?? null
+                ) ?? $manager->getBaseDomain();
+                // An app with no baseURL configured must not take tenant
+                // boot down with a TypeError; the defaults below cover it.
+                $parsed      = parse_url((string) ($appConfig->baseURL ?? '')) ?: [];
                 $scheme      = $parsed['scheme'] ?? 'http';
                 $port        = isset($parsed['port']) ? ':' . $parsed['port'] : '';
                 $path        = rtrim($parsed['path'] ?? '/', '/') . '/';
@@ -52,7 +56,7 @@ class ConfigSystem implements TenantAwareInterface
         } elseif ($tenantId === null && $this->originalBaseURL !== null && $appConfig !== null) {
             $appConfig->baseURL = $this->originalBaseURL;
 
-            $originalParsed = parse_url($this->originalBaseURL);
+            $originalParsed = parse_url((string) $this->originalBaseURL) ?: [];
             $originalHost   = $originalParsed['host'] ?? 'localhost';
             $this->patchSiteURI($this->originalBaseURL, $originalHost);
         }
@@ -109,17 +113,10 @@ class ConfigSystem implements TenantAwareInterface
                 if ($refClass->hasProperty('baseURL')) {
                     $prop = $refClass->getProperty('baseURL');
 
-                    if (PHP_VERSION_ID >= 80100 && $prop->isReadOnly() && $prop->isInitialized($uri)) {
-                    } else {
+                    if (! ($prop->isReadOnly() && $prop->isInitialized($uri))) {
                         $prop->setAccessible(true);
 
-                        $baseURLValue = $newBaseURL;
-
-                        if (method_exists($uri, 'getBaseURL')) {
-                            $baseURLValue = new \CodeIgniter\HTTP\URI($newBaseURL);
-                        }
-
-                        $prop->setValue($uri, $baseURLValue);
+                        $prop->setValue($uri, new \CodeIgniter\HTTP\URI($newBaseURL));
                     }
                 }
             } catch (\Throwable $e) {

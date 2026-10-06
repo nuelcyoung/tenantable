@@ -25,6 +25,7 @@ class StorageSystem implements TenantAwareInterface
     {
         if ($tenantId === null) {
             $this->currentPath = '';
+            unset($_ENV['TENANT_STORAGE_PATH'], $_ENV['TENANT_UPLOAD_PATH']);
             return;
         }
 
@@ -40,6 +41,7 @@ class StorageSystem implements TenantAwareInterface
     public function shutdown(): void
     {
         $this->currentPath = '';
+        unset($_ENV['TENANT_STORAGE_PATH'], $_ENV['TENANT_UPLOAD_PATH']);
     }
 
     public static function getStoragePath(?int $tenantId = null): string

@@ -14,10 +14,12 @@ declare(strict_types=1);
 namespace nuelcyoung\tenantable\Bootstrap;
 
 use nuelcyoung\tenantable\Services\TenantManager;
+use nuelcyoung\tenantable\Support\FrameworkState;
 
 class RedisSystem implements TenantAwareInterface
 {
     protected ?object $config = null;
+    protected bool $captured = false;
     protected array $originalSettings = [];
     protected ?int $originalDatabase = null;
     protected bool $useDatabasePerTenant = false;
@@ -26,10 +28,16 @@ class RedisSystem implements TenantAwareInterface
     public function boot(?int $tenantId, ?array $tenant): void
     {
         if ($tenantId === null) {
+            // Central context: undo tenant scoping, keeping capture state
+            // so a later tenant boot + shutdown still restores the originals.
+            if ($this->captured && $this->config && isset($this->config->default)) {
+                $this->config->default = $this->originalSettings;
+                $this->clearRedisConnections();
+            }
             return;
         }
 
-        $this->config = config('Redis');
+        $this->config = $this->config ?? $this->redisConfig();
 
         if (!$this->config) {
             return;
@@ -39,8 +47,19 @@ class RedisSystem implements TenantAwareInterface
 
         $tenantRedis = $tenant['settings']['redis'] ?? [];
 
-        if ($this->useDatabasePerTenant && $tenantId <= $this->maxDatabase) {
-            $this->configureDatabasePerTenant($tenantId);
+        if ($this->useDatabasePerTenant) {
+            if ($tenantId <= $this->maxDatabase) {
+                $this->configureDatabasePerTenant($tenantId);
+            } else {
+                // Beyond maxDatabase the tenant stays on the default DB and
+                // logs loudly rather than silently degrading to prefix-only.
+                log_message(
+                    'error',
+                    "Redis: tenant {$tenantId} exceeds maxDatabase ({$this->maxDatabase}); " .
+                    'falling back to key-prefix isolation only. Database-per-tenant mode is ' .
+                    'deprecated — disable it and rely on the tenant:{id}: key prefix.'
+                );
+            }
         }
 
         $this->configureKeyPrefix($tenantId, $tenantRedis['prefix'] ?? null);
@@ -56,7 +75,9 @@ class RedisSystem implements TenantAwareInterface
 
     protected function storeOriginalSettings(): void
     {
-        if (!$this->config) {
+        // Capture once per cycle; boot() reruns on every in-process switch
+        // and recapturing would store a tenant prefix as the "original".
+        if (!$this->config || $this->captured) {
             return;
         }
 
@@ -66,6 +87,8 @@ class RedisSystem implements TenantAwareInterface
             if (isset($this->config->default['database'])) {
                 $this->originalDatabase = $this->config->default['database'];
             }
+
+            $this->captured = true;
         }
     }
 
@@ -75,7 +98,9 @@ class RedisSystem implements TenantAwareInterface
             return;
         }
 
-        $database = ($tenantId - 1) % ($this->maxDatabase + 1);
+        // No modulo on purpose: wrapping would seat two tenants in one DB.
+        // boot() keeps the caller in range and logs loudly otherwise.
+        $database = $tenantId - 1;
 
         $this->config->default['database'] = $database;
 
@@ -88,7 +113,14 @@ class RedisSystem implements TenantAwareInterface
             return;
         }
 
-        $prefix = $customPrefix ?? "tenant:{$tenantId}:";
+        $requiredPrefix = "tenant:{$tenantId}:";
+        $prefix         = $requiredPrefix;
+
+        // Settings may be user-editable: custom prefixes are only allowed
+        // as a suffix of the immutable tenant prefix.
+        if ($customPrefix !== null && str_starts_with($customPrefix, $requiredPrefix)) {
+            $prefix = $customPrefix;
+        }
 
         if (!isset($this->config->default)) {
             $this->config->default = [];
@@ -102,31 +134,35 @@ class RedisSystem implements TenantAwareInterface
         }
     }
 
+    /**
+     * Drop the shared cache handler so it is rebuilt with the tenant's
+     * Redis prefix/database, via FrameworkState.
+     */
     protected function clearRedisConnections(): void
     {
-        if (class_exists('Config\Services')) {
-            try {
-                $services = new \ReflectionClass('Config\Services');
-                $property = $services->getProperty('instances');
-                $property->setAccessible(true);
-                $instances = $property->getValue(null);
-
-                if (isset($instances['cache'])) {
-                    unset($instances['cache']);
-                    $property->setValue(null, $instances);
-                }
-            } catch (\Throwable $e) {
-            }
+        if (! class_exists('Config\Services')) {
+            return;
         }
+
+        FrameworkState::resetSharedService('cache');
     }
 
     protected function restoreOriginalSettings(): void
     {
-        if (!$this->config || empty($this->originalSettings)) {
+        if (!$this->config || !$this->captured) {
             return;
         }
 
         $this->config->default = $this->originalSettings;
+
+        $this->captured         = false;
+        $this->originalSettings = [];
+        $this->originalDatabase = null;
+    }
+
+    protected function redisConfig(): ?object
+    {
+        return config('Redis');
     }
 
     public function setUseDatabasePerTenant(bool $use): self

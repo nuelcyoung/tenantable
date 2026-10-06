@@ -25,7 +25,7 @@ class DatabaseSystem implements TenantAwareInterface
     {
         $config = config(TenantableConfig::class);
 
-        if (! $config->separateDatabasePerTenant) {
+        if (! $config->isDatabaseIsolation()) {
             return;
         }
 
@@ -52,7 +52,7 @@ class DatabaseSystem implements TenantAwareInterface
     {
         if ($this->manager === null) {
             $this->manager = new TenantDatabaseManager(
-                $config->separateDatabasePerTenant,
+                $config->isDatabaseIsolation(),
                 $config->defaultDatabaseGroup,
             );
         }

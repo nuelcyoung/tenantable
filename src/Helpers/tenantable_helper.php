@@ -13,6 +13,8 @@ declare(strict_types=1);
 
 use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
 use nuelcyoung\tenantable\Services\TenantManager;
+use nuelcyoung\tenantable\Services\TenantableQueue;
+use nuelcyoung\tenantable\Support\TenantableConfig;
 
 if (!function_exists('tenant_id')) {
     function tenant_id(): ?int
@@ -67,16 +69,51 @@ if (!function_exists('tenant_url')) {
             return site_url($path);
         }
 
-        $tenantConfig = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+        $tenantConfig = TenantableConfig::get();
 
-        $baseUrl = config(\Config\App::class)->baseURL ?? 'http://localhost';
+        $baseUrl = config('App')->baseURL ?? 'http://localhost';
         $scheme  = str_starts_with($baseUrl, 'https://') ? 'https' : 'http';
 
-        $baseDomain = $tenantConfig->baseDomain ?? 'localhost';
+        $manager = TenantManager::getInstance();
+
+        // Prefer the central domain the current host belongs to
+        // (multi-domain setups), falling back to the primary domain.
+        $baseDomain = $manager->getBaseDomainForHost($_SERVER['HTTP_HOST'] ?? null)
+            ?? $manager->getBaseDomain();
+
+        if (empty($baseDomain) || $baseDomain === 'localhost') {
+            $baseDomain = $tenantConfig->baseDomain;
+        }
 
         $path = ltrim((string) $path, '/');
 
         return "{$scheme}://{$subdomain}.{$baseDomain}/{$path}";
+    }
+}
+
+if (!function_exists('tenant_asset')) {
+    /**
+     * URL for a tenant-scoped asset via the central assets route; only
+     * meaningful when $tenantAssetsEnabled is true, else site_url().
+     */
+    function tenant_asset(string $path, ?int $tenantId = null): string
+    {
+        $config = TenantableConfig::get();
+
+        if (! $config->tenantAssetsEnabled) {
+            return site_url($path);
+        }
+
+        $tenantId ??= tenant_id();
+
+        if ($tenantId === null) {
+            return site_url($path);
+        }
+
+        $route = trim($config->tenantAssetsRoute, '/');
+        $path  = ltrim($path, '/');
+
+        return site_url("{$route}/{$tenantId}/{$path}");
     }
 }
 
@@ -111,6 +148,31 @@ if (!function_exists('tenancy_run')) {
     }
 }
 
+if (!function_exists('tenant_push')) {
+    /**
+     * Queue a job that will run in the tenant it was pushed from; with no
+     * tenant active the job is pushed centrally.
+     *
+     * @param array<string, mixed> $data
+     */
+    function tenant_push(string $queue, string $job, array $data = []): bool
+    {
+        return (new TenantableQueue())->push($queue, $job, $data);
+    }
+}
+
+if (!function_exists('central_push')) {
+    /**
+     * Queue a job that runs with no tenant context, even when one is active.
+     *
+     * @param array<string, mixed> $data
+     */
+    function central_push(string $queue, string $job, array $data = []): bool
+    {
+        return (new TenantableQueue())->pushCentral($queue, $job, $data);
+    }
+}
+
 if (!function_exists('can_bypass_tenant')) {
     function can_bypass_tenant(): bool
     {
@@ -124,7 +186,7 @@ if (!function_exists('can_bypass_tenant')) {
             return false;
         }
 
-        $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+        $config = TenantableConfig::get();
 
         foreach ($config->superadminGroups as $group) {
             if ($user->inGroup($group)) {

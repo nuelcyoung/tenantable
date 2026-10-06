@@ -105,6 +105,11 @@ class PostgreCompatibilityTest extends TestCase
         $this->createdDatabases[] = $database;
         $this->assertTrue($manager->createDatabase($database), 'provisioning must be idempotent');
 
+        // Run before opening our own connection: pg_connect() reuses an open
+        // link with an identical DSN, so migrateTenant()'s close() would
+        // otherwise close ours too.
+        $this->runTenantMigrations($manager, $tenant);
+
         $config             = $this->baseConfig;
         $config['database'] = $database;
         $tenantDb           = (new Database())->load($config, 'tenantable-postgres-tenant');
@@ -114,7 +119,6 @@ class PostgreCompatibilityTest extends TestCase
 
             $forge = (new Database())->loadForge($tenantDb);
             $this->runCentralMigrations($forge);
-            $this->runTenantMigrations($manager, $tenant);
 
             $this->assertTrue($tenantDb->tableExists('tenants'));
             $this->assertTrue($tenantDb->tableExists('tenant_domains'));

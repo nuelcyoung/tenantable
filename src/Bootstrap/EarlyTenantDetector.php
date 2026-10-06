@@ -19,67 +19,40 @@ use nuelcyoung\tenantable\Services\TenantResolverCache;
 use nuelcyoung\tenantable\Exceptions\TenantNotFoundException;
 use nuelcyoung\tenantable\Exceptions\TenantInactiveException;
 
-/**
- * EarlyTenantDetector
- * 
- * Detects tenant BEFORE CodeIgniter initializes sessions, cache, etc.
- * Must be registered in Events.php under 'pre_system' with priority 1.
- * 
- * This runs before:
- * - Session initialization
- * - Cache initialization  
- * - Database connection (optional)
- * - Any services that need tenant context
- */
+/** Detects tenant in pre_system before sessions/cache/services initialize. */
 class EarlyTenantDetector
 {
-    /**
-     * Detect tenant from request
-     * 
-     * @return void
-     */
     public static function detect(): void
     {
-        // Don't run in CLI
-        if (PHP_SAPI === 'cli') {
+        if (PHP_SAPI === 'cli' && ! self::isHttpRequest()) {
             return;
         }
 
         $config = self::getConfig();
 
-        // Check early detection strategy
         $strategy = $config->earlyDetectionStrategy ?? 'domain_or_subdomain';
         if ($strategy === 'off') {
             return;
         }
 
-        // Skip bypass routes (health probes, public APIs, etc) — they don't
-        // need tenant context and pre_system DB work is pure waste for them.
         if (self::isBypassedRoute($config)) {
             return;
         }
 
-        // Get host
-        $host = $_SERVER['HTTP_HOST'] ?? '';
-        $host = explode(':', (string) $host)[0]; // strip port
+        $manager = TenantManager::getInstance();
+        $host    = $manager->normalizeHost((string) ($_SERVER['HTTP_HOST'] ?? ''));
 
-        if ($host === '') {
+        if ($host === null) {
             return;
         }
 
-        $manager = TenantManager::getInstance();
-
-        // Reject hosts not on the trusted allowlist before touching the
-        // cache or DB. The filter will render a 400 downstream — here we
-        // just bail out so we don't pollute the negative-cache with
-        // attacker-controlled hosts.
+        // Reject untrusted hosts before touching cache/DB.
         if (! $manager->isHostAllowed($host)) {
             return;
         }
 
-        // Skip if localhost and not configured
         if ($manager->isLocalhost($host)) {
-            if ($config->allowLocalhost ?? true) {
+            if ($config->allowLocalhost ?? false) {
                 return;
             }
         }
@@ -87,12 +60,10 @@ class EarlyTenantDetector
         try {
             $resolved = false;
 
-            // Try domain resolution first (if strategy allows)
             if (in_array($strategy, ['domain', 'domain_or_subdomain'], true)) {
                 $resolved = self::resolveByDomain($host, $manager);
             }
 
-            // Fall back to subdomain (if strategy allows and domain didn't resolve)
             if (!$resolved && in_array($strategy, ['subdomain', 'domain_or_subdomain'], true)) {
                 $subdomain = $manager->extractSubdomain($host);
                 
@@ -106,38 +77,27 @@ class EarlyTenantDetector
                 return;
             }
 
-            // Bootstrap table manager if using prefix strategy
             $tableManager = TenantTableManager::getInstance();
             $tableManager->setTenant(
                 $manager->getTenantId(),
                 $manager->getSubdomain()
             );
 
-            // Now configure session path BEFORE session starts
             self::configureSession($manager->getTenantId());
 
-            // Configure cache prefix
             self::configureCache($manager->getTenantId());
-
-            // Configure storage paths
             self::configureStorage($manager->getTenantId());
-            
+
         } catch (TenantNotFoundException|TenantInactiveException $e) {
-            // pre_system runs BEFORE the filter pipeline — rethrowing would
-            // bypass BaseTenantFilter::handleNotFound/Inactive and surface a
-            // raw exception page. Clear any partial state and let the filter
-            // re-resolve and render the configured 404/403 view.
+            // Let the filter re-resolve; don't surface a raw exception.
             TenantManager::getInstance()->clear();
         } catch (\Throwable $e) {
-            // Generic safety net: log + abort early bootstrap, do not configure
             TenantManager::getInstance()->clear();
             error_log("EarlyTenantDetector: {$e->getMessage()}");
         }
     }
 
-    /**
-     * Resolve tenant by full custom domain using resolver cache.
-     */
+    /** Resolve tenant by custom domain via cache. */
     protected static function resolveByDomain(string $host, TenantManager $manager): bool
     {
         $cache  = TenantResolverCache::getInstance();
@@ -152,49 +112,43 @@ class EarlyTenantDetector
             return true;
         }
 
-        if ($cached['is_active'] !== true) {
+        if (empty($cached['is_active'])) {
             throw new TenantInactiveException("Tenant for domain '{$host}' is inactive");
         }
         $manager->setTenantById($cached['tenant_id']);
         return true;
     }
 
-    /**
-     * Configure session for tenant
-     * 
-     * CRITICAL: Must run before session starts
-     */
-    protected static function configureSession(?int $tenantId): void
+    /** Configure session for tenant. Must run before session starts. */
+    protected static function configureSession(?int $tenantId, ?object $config = null): void
     {
         if ($tenantId === null) {
             return;
         }
 
-        $config = config('Session');
-        
+        $config ??= config('Session');
+
         if (!$config) {
             return;
         }
 
-        // Set tenant-specific session save path
-        $basePath = WRITEPATH . 'session';
-        $tenantPath = $basePath . '/tenant_' . $tenantId;
-        
-        // Create directory if needed
-        if (!is_dir($tenantPath)) {
-            mkdir($tenantPath, 0755, true);
-        }
-        
-        // Set BEFORE session starts
-        $config->savePath = $tenantPath;
+        // Only file handler uses savePath as directory.
+        if (Systems\SessionSystem::usesFileHandler($config)) {
+            $tenantPath = Systems\SessionSystem::tenantSavePath($tenantId);
 
-        // Also set session cookie name to include tenant (use declared $cookieName)
-        $config->cookieName = 'tenant_' . $tenantId . '_session';
+            if (!is_dir($tenantPath)) {
+                mkdir($tenantPath, 0700, true);
+            }
+
+            $config->savePath = $tenantPath;
+        }
+
+        if (Systems\SessionSystem::perTenantCookiesFlag() && property_exists($config, 'cookieName')) {
+            $config->cookieName = Systems\SessionSystem::tenantCookieName($tenantId);
+        }
     }
 
-    /**
-     * Configure cache for tenant
-     */
+    /** Set cache prefix for tenant. */
     protected static function configureCache(?int $tenantId): void
     {
         $config = config('Cache');
@@ -205,22 +159,22 @@ class EarlyTenantDetector
         
         // Set prefix for all cache keys
         $config->prefix = $tenantId !== null ? "tenant_{$tenantId}_" : '';
+        Systems\CacheSystem::resetSharedCache();
     }
 
-    /**
-     * Configure storage paths for tenant
-     */
+    /** Create storage path for tenant. */
     protected static function configureStorage(?int $tenantId): void
     {
         if ($tenantId === null) {
+            unset($_ENV['TENANT_STORAGE_PATH'], $_ENV['TENANT_UPLOAD_PATH']);
             return;
         }
 
         // Define tenant storage path constant
-        $storagePath = ROOTPATH . 'writable' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'tenant_' . $tenantId;
+        $storagePath = WRITEPATH . 'uploads' . DIRECTORY_SEPARATOR . 'tenant_' . $tenantId;
         
         if (!is_dir($storagePath)) {
-            mkdir($storagePath, 0755, true);
+            mkdir($storagePath, 0700, true);
         }
         
         // Set as environment variable for helpers
@@ -228,9 +182,7 @@ class EarlyTenantDetector
         $_ENV['TENANT_UPLOAD_PATH'] = $storagePath;
     }
 
-    /**
-     * Match the current request URI against $bypassRoutes from config.
-     */
+    /** Match URI against bypass routes. */
     protected static function isBypassedRoute($config): bool
     {
         $patterns = $config->bypassRoutes ?? [];
@@ -251,20 +203,23 @@ class EarlyTenantDetector
         return false;
     }
 
-    /**
-     * Get config
-     */
     protected static function getConfig()
     {
-        // Try to load config, return defaults if not found
         try {
             return config('Tenantable');
         } catch (\Throwable $e) {
             return new class {
                 public string $baseDomain = 'localhost';
-                public bool $allowLocalhost = true;
+                public bool $allowLocalhost = false;
                 public string $earlyDetectionStrategy = 'domain_or_subdomain';
             };
         }
+    }
+
+    /** Persistent HTTP workers commonly report PHP_SAPI as "cli". */
+    private static function isHttpRequest(): bool
+    {
+        return PHP_SAPI !== 'cli'
+            || (isset($_SERVER['REQUEST_METHOD']) && (string) $_SERVER['REQUEST_METHOD'] !== '');
     }
 }

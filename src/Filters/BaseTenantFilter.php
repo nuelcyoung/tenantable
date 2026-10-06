@@ -20,24 +20,17 @@ use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
 use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Exceptions\TenantNotFoundException;
 use nuelcyoung\tenantable\Exceptions\TenantInactiveException;
+use nuelcyoung\tenantable\Exceptions\TenantAccessDeniedException;
+use nuelcyoung\tenantable\Support\TenantableConfig;
+use CodeIgniter\Events\Events;
 
-/**
- * Abstract base class shared by all identification filters.
- *
- * Each concrete filter only needs to implement identify(RequestInterface).
- * All shared logic (bypass routes, error handling, config loading, bootstrap
- * wiring, event dispatch) lives here.
- */
+/** Abstract base for identification filters. Only identify() is abstract. */
 abstract class BaseTenantFilter implements FilterInterface
 {
     protected array   $bypassRoutes    = [];
     protected bool    $throwExceptions = false;
     protected ?string $notFoundView    = null;
     protected ?string $inactiveView    = null;
-
-    // -------------------------------------------------------------------------
-    // FilterInterface
-    // -------------------------------------------------------------------------
 
     final public function before(RequestInterface $request, $arguments = null)
     {
@@ -48,7 +41,7 @@ abstract class BaseTenantFilter implements FilterInterface
         $this->loadConfigDefaults();
 
         if ($arguments !== null) {
-            $this->configure((array) $arguments);
+            $this->configure($this->normalizeArguments((array) $arguments));
         }
 
         if ($this->shouldBypass($request->getUri()->getPath())) {
@@ -57,7 +50,6 @@ abstract class BaseTenantFilter implements FilterInterface
 
         $host = $this->extractHost($request);
 
-        // #8 — Validate HTTP_HOST against allowlist
         if (!$this->validateHost($host)) {
             $response = service('response');
             $response->setStatusCode(400);
@@ -66,59 +58,98 @@ abstract class BaseTenantFilter implements FilterInterface
 
         $manager = TenantManager::getInstance();
 
-        // EarlyTenantDetector may have resolved the tenant in pre_system
-        // already. If so, skip identify() to avoid a duplicate DB query.
-        if (! $manager->hasTenant()) {
+        // Skip if early detection already resolved.
+        $hasTenant = $manager->hasTenant();
+
+        if (! $hasTenant) {
             try {
                 $this->identify($request);
             } catch (TenantNotFoundException $e) {
                 return $this->handleNotFound($request);
             } catch (TenantInactiveException $e) {
                 return $this->handleInactive($request);
+            } catch (TenantAccessDeniedException $e) {
+                return $this->handleAccessDenied($request);
             }
 
-            if (! $manager->hasTenant()) {
-                return; // identification method found no tenant — not an error
-            }
+            $hasTenant = $manager->hasTenant();
         }
 
-        TenantBootstrap::getInstance()->initialize()->boot();
+        if (! $hasTenant) {
+            $config = TenantableConfig::get();
 
-        \CodeIgniter\Events\Events::trigger('tenancyInitialized', new \nuelcyoung\tenantable\Events\TenancyInitialized(
-            $manager->getTenantId(),
-            $manager->getTenant()
-        ));
+            // Local dev may run without a tenant. Stop here otherwise.
+            if ($config->allowLocalhost && TenantManager::getInstance()->isLocalhost($host)) {
+                return;
+            }
+
+            return $this->handleNotFound($request);
+        }
+
+        try {
+            // Authorize even if early detection resolved. Routing is not authorization.
+            $this->authorizeTenant($request, $manager);
+
+            TenantBootstrap::getInstance()->initialize()->boot();
+
+            Events::trigger('tenancyInitialized', new \nuelcyoung\tenantable\Events\TenancyInitialized(
+                $manager->getTenantId(),
+                $manager->getTenant()
+            ));
+        } catch (TenantAccessDeniedException $e) {
+            return $this->handleAccessDenied($request);
+        }
     }
 
     final public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
     {
-        // Shutdown is handled later by PackageEvents::register() on post_system.
     }
 
-    // -------------------------------------------------------------------------
-    // Abstract — concrete filters implement this
-    // -------------------------------------------------------------------------
-
-    /**
-     * Identify the tenant from the request and call TenantManager accordingly.
-     *
-     * @throws TenantNotFoundException
-     * @throws TenantInactiveException
-     */
+    /** Identify the tenant from the request. */
     abstract protected function identify(RequestInterface $request): void;
 
-    // -------------------------------------------------------------------------
-    // Configuration
-    // -------------------------------------------------------------------------
+    /** Hook for authorization. */
+    protected function authorizeTenant(RequestInterface $request, TenantManager $manager): void
+    {
+    }
 
     protected function loadConfigDefaults(): void
     {
         try {
-            $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
-            $this->throwExceptions = $config->throwExceptions ?? false;
+            $config = TenantableConfig::get();
+            $this->throwExceptions = $config->throwExceptions;
             $this->notFoundView    = $config->notFoundView    ?? null;
             $this->inactiveView    = $config->inactiveView    ?? null;
+            $this->bypassRoutes    = $config->bypassRoutes;
         } catch (\Throwable $e) {}
+    }
+
+    /** Normalize filter arguments (key=value tokens to assoc array). */
+    protected function normalizeArguments(array $arguments): array
+    {
+        $normalized = [];
+        $positional = [];
+
+        foreach ($arguments as $key => $value) {
+            if (is_string($key)) {
+                $normalized[$key] = $value;
+                continue;
+            }
+
+            if (is_string($value) && str_contains($value, '=')) {
+                [$k, $v] = explode('=', $value, 2);
+                $normalized[trim($k)] = trim($v);
+                continue;
+            }
+
+            $positional[] = $value;
+        }
+
+        if ($positional !== []) {
+            $normalized['_positional'] = $positional;
+        }
+
+        return $normalized;
     }
 
     protected function configure(array $arguments): void
@@ -141,6 +172,8 @@ abstract class BaseTenantFilter implements FilterInterface
 
     protected function shouldBypass(string $uriPath): bool
     {
+        $uriPath = ltrim($uriPath, '/');
+
         foreach ($this->bypassRoutes as $pattern) {
             if (fnmatch($pattern, $uriPath)) {
                 return true;
@@ -149,25 +182,17 @@ abstract class BaseTenantFilter implements FilterInterface
         return false;
     }
 
-    // -------------------------------------------------------------------------
-    // Host validation (#8)
-    // -------------------------------------------------------------------------
-
     protected function extractHost(RequestInterface $request): string
     {
         $host = $_SERVER['HTTP_HOST'] ?? $request->getServer('HTTP_HOST') ?? '';
-        return explode(':', (string) $host)[0];
+
+        return TenantManager::getInstance()->normalizeHost((string) $host) ?? '';
     }
 
     protected function validateHost(string $host): bool
     {
         return TenantManager::getInstance()->isHostAllowed($host);
     }
-
-    // -------------------------------------------------------------------------
-    // Error handling
-    // -------------------------------------------------------------------------
-
     protected function handleNotFound(RequestInterface $request)
     {
         if ($this->throwExceptions) {
@@ -198,5 +223,17 @@ abstract class BaseTenantFilter implements FilterInterface
         }
 
         return $response->setBody('Tenant is inactive');
+    }
+
+    protected function handleAccessDenied(RequestInterface $request)
+    {
+        if ($this->throwExceptions) {
+            throw new TenantAccessDeniedException('Tenant access denied');
+        }
+
+        $response = service('response');
+        $response->setStatusCode(403);
+
+        return $response->setBody('Tenant access denied');
     }
 }

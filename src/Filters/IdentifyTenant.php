@@ -18,23 +18,16 @@ use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Services\TenantResolverCache;
 use nuelcyoung\tenantable\Exceptions\TenantNotFoundException;
 use nuelcyoung\tenantable\Exceptions\TenantInactiveException;
+use nuelcyoung\tenantable\Exceptions\TenantAccessDeniedException;
+use nuelcyoung\tenantable\Support\TenantableConfig;
 
-/**
- * IdentifyTenant
- *
- * Strategy-driven tenant identification filter.
- * Replaces the individual DomainFilter, SubdomainFilter, etc. with one
- * canonical path while keeping the old aliases as thin wrappers.
- *
- * Usage:
- *   'tenant' => ['except' => ['health']]
- *   'tenant:strategy=domain_or_subdomain' => ['except' => ['health']]
- *   'tenant:strategy=domain,strict=true' => ['except' => ['health']]
- */
+/** Strategy-driven tenant identification. */
 class IdentifyTenant extends BaseTenantFilter
 {
     protected string $strategy = 'domain_or_subdomain';
     protected bool   $strict   = false;
+
+    private const STRATEGIES = ['domain', 'subdomain', 'domain_or_subdomain', 'request_data', 'path', 'origin'];
 
     protected function configure(array $arguments): void
     {
@@ -42,7 +35,15 @@ class IdentifyTenant extends BaseTenantFilter
 
         if (isset($arguments['strategy'])) {
             $this->strategy = (string) $arguments['strategy'];
+        } else {
+            foreach ($arguments['_positional'] ?? [] as $token) {
+                if (is_string($token) && in_array($token, self::STRATEGIES, true)) {
+                    $this->strategy = $token;
+                    break;
+                }
+            }
         }
+
         if (isset($arguments['strict'])) {
             $this->strict = filter_var($arguments['strict'], FILTER_VALIDATE_BOOLEAN);
         }
@@ -58,9 +59,9 @@ class IdentifyTenant extends BaseTenantFilter
 
         $manager = TenantManager::getInstance();
 
-        // Localhost bypass unless strict
-        if (!$this->strict && $manager->isLocalhost($host)) {
-            $config = $this->getTenantableConfig();
+        $config = $this->getTenantableConfig();
+
+        if (!$this->strict && ($config->allowLocalhost ?? false) && $manager->isLocalhost($host)) {
             $devTenantId = $config->developmentTenantId ?? null;
             if ($devTenantId !== null) {
                 $manager->setTenantById((int) $devTenantId);
@@ -94,12 +95,20 @@ class IdentifyTenant extends BaseTenantFilter
             case 'path':
                 $this->resolveByPath($request, $manager);
                 break;
+
+            case 'origin':
+                if (!$this->resolveByOrigin($request, $manager)) {
+                    throw new TenantNotFoundException('No tenant found for the request Origin header');
+                }
+                break;
+        }
+
+        if ($manager->hasTenant()) {
+            $this->authorizeTenant($request, $manager);
         }
     }
 
-    /**
-     * Resolve by full domain. Returns true if resolved.
-     */
+    /** Resolve a tenant by its domain. */
     protected function resolveByDomain(string $host, TenantManager $manager): bool
     {
         $cache  = TenantResolverCache::getInstance();
@@ -110,18 +119,43 @@ class IdentifyTenant extends BaseTenantFilter
         }
 
         if (!empty($cached['tenant']) && is_array($cached['tenant'])) {
-            // Populate from cache row — no extra DB read. setTenant() handles
-            // the is_active check.
             $manager->setTenant($cached['tenant']);
             return true;
         }
 
-        // Legacy cache shape (id + is_active only) — fall back to a fresh lookup.
-        if ($cached['is_active'] !== true) {
+        // Old cache format. Look it up again.
+        if (empty($cached['is_active'])) {
             throw new TenantInactiveException("Tenant for domain '{$host}' is inactive");
         }
         $manager->setTenantById($cached['tenant_id']);
         return true;
+    }
+
+    /**
+     * Resolve a tenant from the Origin header's host, for browser API
+     * clients on a shared API domain, avoiding a CORS preflight.
+     */
+    protected function resolveByOrigin(RequestInterface $request, TenantManager $manager): bool
+    {
+        $origin = trim((string) $request->getHeaderLine('Origin'));
+
+        if ($origin === '' || strtolower($origin) === 'null') {
+            return false;
+        }
+
+        $host = parse_url($origin, PHP_URL_HOST);
+
+        if (! is_string($host) || $host === '') {
+            return false;
+        }
+
+        $host = $manager->normalizeHost($host) ?? '';
+
+        if ($host === '') {
+            return false;
+        }
+
+        return $this->resolveByDomain($host, $manager);
     }
 
     protected function resolveByRequestData(RequestInterface $request, TenantManager $manager): void
@@ -136,6 +170,14 @@ class IdentifyTenant extends BaseTenantFilter
         if (!empty($query)) {
             $manager->setTenantBySubdomain(trim((string) $query));
             return;
+        }
+
+        $body = $request->getPost('tenant');
+        if (empty($body) && method_exists($request, 'getJsonVar')) {
+            $body = $request->getJsonVar('tenant');
+        }
+        if (!empty($body) && (is_string($body) || is_numeric($body))) {
+            $manager->setTenantBySubdomain(trim((string) $body));
         }
     }
 
@@ -155,13 +197,51 @@ class IdentifyTenant extends BaseTenantFilter
     protected function extractHost(RequestInterface $request): string
     {
         $host = $_SERVER['HTTP_HOST'] ?? $request->getServer('HTTP_HOST') ?? '';
-        return explode(':', (string) $host)[0];
+
+        return TenantManager::getInstance()->normalizeHost((string) $host) ?? '';
+    }
+
+    /** Request/path selectors require an authorization callback. */
+    protected function authorizeTenant(RequestInterface $request, TenantManager $manager): void
+    {
+        $config     = $this->getTenantableConfig();
+        $authorizer = $config->tenantAuthorizer ?? null;
+
+        if (! is_callable($authorizer) && in_array($this->strategy, ['request_data', 'path'], true)) {
+            $tenantId = $manager->getTenantId();
+            $manager->clear();
+
+            throw TenantAccessDeniedException::forTenant((int) $tenantId);
+        }
+
+        if (! is_callable($authorizer)) {
+            return;
+        }
+
+        $tenant = $manager->getTenant();
+        $tenantId = $manager->getTenantId();
+
+        try {
+            $allowed = is_array($tenant) && $authorizer($request, $tenant);
+        } catch (\Throwable $e) {
+            $allowed = false;
+            log_message('warning', 'Tenant authorization callback failed.', [
+                'tenant_id' => $tenantId,
+                'exception' => $e,
+            ]);
+        }
+
+        if (! $allowed) {
+            $manager->clear();
+
+            throw TenantAccessDeniedException::forTenant((int) $tenantId);
+        }
     }
 
     protected function getTenantableConfig(): object
     {
         try {
-            return config(\nuelcyoung\tenantable\Config\Tenantable::class);
+            return TenantableConfig::get();
         } catch (\Throwable $e) {
             return new class {
                 public ?int $developmentTenantId = null;

@@ -13,16 +13,10 @@ declare(strict_types=1);
 
 namespace nuelcyoung\tenantable\Support;
 
-/**
- * Pure file-content patchers used by `tenants:install`.
- *
- * Every method takes raw source as input and returns the transformed
- * source plus a list of changes made. No filesystem or CLI side-effects
- * — keeps the install command's wiring logic unit-testable.
- */
+/** Pure file-content patchers for the install command. No filesystem side-effects. */
 final class InstallPatcher
 {
-    /** Map of strategy name → registered filter alias. */
+    /** Strategy name → filter alias. */
     public const STRATEGY_FILTER = [
         'subdomain'           => 'tenant_subdomain',
         'domain'              => 'tenant_domain',
@@ -31,7 +25,7 @@ final class InstallPatcher
         'request_data'        => 'tenant_request',
     ];
 
-    /** Aliases that already imply "this request has a tenant resolved". */
+    /** Aliases implying "tenant resolved". */
     private const TENANT_IDENTIFIERS = [
         'tenant',
         'identify_tenant',
@@ -42,12 +36,7 @@ final class InstallPatcher
         'tenant_request',
     ];
 
-    /**
-     * Insert `$identifyAlias` and `tenant_security` into $globals[before]/[after]
-     * in `app/Config/Filters.php`, skipping entries that already exist.
-     *
-     * @return array{source:string,added:list<string>,changed:bool,located:bool}
-     */
+    /** Insert filters into the globals before/after arrays. Skips existing entries. */
     public static function patchFilters(string $source, string $identifyAlias): array
     {
         $beforeBounds = self::locateSubArray($source, 'globals', 'before');
@@ -75,11 +64,11 @@ final class InstallPatcher
 
         $insertBefore = '';
         if (! $hasIdentifier) {
-            $insertBefore .= "            '{$identifyAlias}' => ['except' => ['health', 'api/*']],\n";
+            $insertBefore .= "            '{$identifyAlias}' => ['except' => ['health', '_health']],\n";
             $added[]       = "before: {$identifyAlias}";
         }
         if (! $hasSecurityBefore) {
-            $insertBefore .= "            'tenant_security' => ['except' => ['health', 'api/*']],\n";
+            $insertBefore .= "            'tenant_security' => ['except' => ['health', '_health']],\n";
             $added[]       = 'before: tenant_security';
         }
 
@@ -92,7 +81,7 @@ final class InstallPatcher
 
         $afterBody = substr($patched, $afterStart, $afterEnd - $afterStart);
         if (! self::aliasInBlock($afterBody, 'tenant_security')) {
-            $insertAfter = "            'tenant_security' => ['except' => ['health', 'api/*']],\n";
+            $insertAfter = "            'tenant_security' => ['except' => ['health', '_health']],\n";
             $patched     = substr_replace($patched, $insertAfter, $afterStart, 0);
             $added[]     = 'after: tenant_security';
         }
@@ -105,13 +94,8 @@ final class InstallPatcher
         ];
     }
 
-    /**
-     * Add `PackageEvents::register()` and (optionally) the `EarlyTenantDetector`
-     * pre_system listener to `app/Config/Events.php`. Idempotent.
-     *
-     * @return array{source:string,added:list<string>,changed:bool}
-     */
-    public static function patchEvents(string $source, bool $earlyDetection): array
+    /** Add the package events registration to Events.php. Idempotent. */
+    public static function patchEvents(string $source): array
     {
         $patched = $source;
         $added   = [];
@@ -125,16 +109,6 @@ final class InstallPatcher
             $added[] = 'PackageEvents::register()';
         }
 
-        if ($earlyDetection && ! str_contains($patched, 'EarlyTenantDetector')) {
-            $patched = self::ensureUse($patched, 'nuelcyoung\\tenantable\\Bootstrap\\EarlyTenantDetector');
-            $patched = self::ensureUse($patched, 'CodeIgniter\\Events\\Events');
-            $patched = self::appendBlock(
-                $patched,
-                "// Tenantable: detect tenant before the filter chain runs.\nEvents::on('pre_system', [EarlyTenantDetector::class, 'detect'], 1);\n",
-            );
-            $added[] = 'EarlyTenantDetector pre_system listener';
-        }
-
         return [
             'source'  => $patched,
             'added'   => $added,
@@ -142,39 +116,29 @@ final class InstallPatcher
         ];
     }
 
-    /**
-     * Render the published config from a stub.
-     */
+    /** Render published config from stub. */
     public static function renderConfig(
         string $stub,
         string $baseDomain,
         string $mode,
         string $strategy,
         bool $early,
+        bool $shipSessions = false,
     ): string {
         return strtr($stub, [
-            '{{base_domain}}'           => $baseDomain,
+            '{{base_domain}}'           => var_export($baseDomain, true),
             '{{isolation_mode}}'        => "'{$mode}'",
             '{{separate_db}}'           => $mode === 'database' ? 'true' : 'false',
             '{{identification_method}}' => self::STRATEGY_FILTER[$strategy] ?? 'tenant_subdomain',
             '{{strategy}}'              => $strategy,
-            '{{early_detection}}'       => $early ? $strategy : 'off',
+            '{{early_detection}}'       => $early && in_array($strategy, ['subdomain', 'domain', 'domain_or_subdomain'], true)
+                ? $strategy
+                : 'off',
+            '{{ship_sessions}}'         => $shipSessions ? 'true' : 'false',
         ]);
     }
 
-    // ---------------------------------------------------------------
-    // internal helpers
-    // ---------------------------------------------------------------
-
-    /**
-     * Locate the body bounds of `'$key' => [ ... ]` inside the
-     * `public array $$prop = [ ... ]` declaration.
-     *
-     * Returns `[start, end]` byte offsets pointing right AFTER the
-     * opening `[` and BEFORE the closing `]`, or null if not found.
-     *
-     * @return array{0:int,1:int}|null
-     */
+    /** Find body bounds of a keyed sub-array within a public array property. */
     private static function locateSubArray(string $source, string $prop, string $key): ?array
     {
         $propPattern = '~public\s+array\s+\$' . preg_quote($prop, '~') . '\s*=\s*\[~';

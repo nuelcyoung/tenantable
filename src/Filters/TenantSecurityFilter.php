@@ -11,14 +11,15 @@
 
 declare(strict_types=1);
 
-namespace nuelcyoung\tenantable\Middleware;
+namespace nuelcyoung\tenantable\Filters;
 
 use CodeIgniter\Filters\FilterInterface;
 use CodeIgniter\HTTP\RequestInterface;
 use CodeIgniter\HTTP\ResponseInterface;
 use nuelcyoung\tenantable\Services\TenantManager;
+use nuelcyoung\tenantable\Support\TenantableConfig;
 
-class TenantSecurityMiddleware implements FilterInterface
+class TenantSecurityFilter implements FilterInterface
 {
     protected array $exemptRoutes     = [];
     protected array $protectedFields  = ['tenant_id', 'school_id', 'org_id'];
@@ -78,9 +79,14 @@ class TenantSecurityMiddleware implements FilterInterface
             return false;
         }
 
-        $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+        // Guard inGroup() call: custom user providers may lack it.
+        if (! is_object($user) || ! method_exists($user, 'inGroup')) {
+            return false;
+        }
 
-        foreach ($config->superadminGroups ?? [] as $group) {
+        $config = TenantableConfig::get();
+
+        foreach ($config->superadminGroups as $group) {
             if ($user->inGroup($group)) {
                 return true;
             }

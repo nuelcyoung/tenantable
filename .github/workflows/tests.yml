@@ -1,0 +1,92 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.1', '8.2', '8.3']
+        dependency-version: ['highest']
+        include:
+          # Verify the package still works against the lowest supported
+          # CodeIgniter (4.4), where the Model $casts feature does not exist.
+          - php-version: '8.1'
+            dependency-version: 'lowest'
+
+    name: PHP ${{ matrix.php-version }} (${{ matrix.dependency-version }} deps)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring, intl, pdo, pdo_sqlite
+          coverage: none
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Install dependencies (highest)
+        if: matrix.dependency-version == 'highest'
+        run: composer install --prefer-dist --no-progress
+
+      - name: Install dependencies (lowest)
+        if: matrix.dependency-version == 'lowest'
+        run: composer update --prefer-lowest --prefer-stable --prefer-dist --no-progress
+
+      - name: Run test suite
+        run: composer test
+
+  postgresql:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: tenantable
+          POSTGRES_PASSWORD: tenantable
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tenantable -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TENANTABLE_TEST_POSTGRES: '1'
+      TENANTABLE_POSTGRES_HOST: 127.0.0.1
+      TENANTABLE_POSTGRES_PORT: 5432
+      TENANTABLE_POSTGRES_DATABASE: postgres
+      TENANTABLE_POSTGRES_USER: tenantable
+      TENANTABLE_POSTGRES_PASSWORD: tenantable
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, intl, pdo, pdo_sqlite, pgsql, pdo_pgsql
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run PostgreSQL test suite
+        run: composer test

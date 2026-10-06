@@ -1,0 +1,25 @@
+parameters:
+    level: 5
+    paths:
+        - src
+    excludePaths:
+        - src/Database/Migrations
+    bootstrapFiles:
+        - tests/phpstan-bootstrap.php
+        - tests/phpstan-stubs.php
+    scanDirectories:
+        - vendor/codeigniter4/framework/system
+    treatPhpDocTypesAsCertain: false
+    # ENVIRONMENT is fixed per process but differs between deployments; without
+    # this PHPStan resolves it to whatever the analysed build happens to define
+    # and calls every other branch dead.
+    dynamicConstantNames:
+        - ENVIRONMENT
+    ignoreErrors:
+        # Filter/middleware return-path analysis; methods intentionally return null implicitly
+        - '#Method nuelcyoung\\tenantable\\(Filters|Middleware)\\.*::(before|after)\(\) should return#'
+        # RequestInterface narrowings resolved at runtime
+        - '#Call to an undefined method CodeIgniter\\HTTP\\RequestInterface::(getGet|getPost|setGlobal)\(\)#'
+        # Consumer-facing API: applied in app models, never inside this package
+        -
+            identifier: trait.unused

@@ -1,5 +1,7 @@
 /.claude/
+/.qwen/
 /vendor/
+/writable/
 /.phpunit.cache/
 /node_modules/
 /.idea/
@@ -7,5 +9,4 @@
 *.log
 .DS_Store
 Thumbs.db
-/.claude/
 AGENTS.md

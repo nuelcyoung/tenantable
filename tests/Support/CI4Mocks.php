@@ -51,7 +51,7 @@ function config(string $name)
         },
         'Tenantable' => new class {
             public string $baseDomain = 'test.example.com';
-            public bool $allowLocalhost = true;
+            public bool $allowLocalhost = false;
             public array $bootstrappers = [];
         },
         default => null,

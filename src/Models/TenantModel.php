@@ -16,9 +16,22 @@ namespace nuelcyoung\tenantable\Models;
 use nuelcyoung\tenantable\Events\TenantCreated;
 use nuelcyoung\tenantable\Events\TenantUpdated;
 use nuelcyoung\tenantable\Events\TenantDeleted;
+use nuelcyoung\tenantable\Config\Tenantable as PackageConfig;
+use nuelcyoung\tenantable\Support\TenantableConfig;
+use nuelcyoung\tenantable\Services\TenantableQueue;
+use nuelcyoung\tenantable\Services\TenantResolverCache;
 
 class TenantModel extends GlobalModel
 {
+    /** The tenant's storage exists and is migrated; it may serve traffic. */
+    public const STATUS_READY = 'ready';
+
+    /** The row exists but its database or tables do not yet. */
+    public const STATUS_PROVISIONING = 'provisioning';
+
+    /** Provisioning ran and failed. Needs an operator, not a retry loop. */
+    public const STATUS_FAILED = 'failed';
+
     protected $table            = 'tenants';
     protected $primaryKey       = 'id';
     protected $useAutoIncrement = true;
@@ -31,6 +44,7 @@ class TenantModel extends GlobalModel
         'domain',
         'is_active',
         'settings',
+        'status',
     ];
 
     protected bool $allowEmptyInserts = false;
@@ -38,7 +52,7 @@ class TenantModel extends GlobalModel
 
     protected array $casts = [
         'is_active' => 'boolean',
-        'settings'  => '?array',
+        'settings'  => '?json-array',
     ];
 
     protected array $castHandlers = [];
@@ -69,43 +83,177 @@ class TenantModel extends GlobalModel
     protected $cleanValidationRules = true;
 
     protected $allowCallbacks = true;
-    protected $beforeInsert   = [];
+    protected $beforeInsert   = ['encodeSettings', 'stampProvisioningStatus'];
     protected $afterInsert    = ['dispatchCreated'];
-    protected $beforeUpdate   = ['captureBeforeUpdate'];
+    protected $beforeUpdate   = ['captureBeforeUpdate', 'encodeSettings'];
     protected $afterUpdate    = ['dispatchUpdated'];
     protected $beforeFind     = [];
-    protected $afterFind      = [];
+    protected $afterFind      = ['decodeSettings'];
     protected $beforeDelete   = ['captureBeforeDelete'];
     protected $afterDelete    = ['dispatchDeleted'];
 
     private array $beforeUpdateSnapshots = [];
     private array $beforeDeleteSnapshots = [];
 
-    protected function dispatchCreated(array $data): array
+    /**
+     * Mark a new tenant as provisioning when provisioning is deferred. Stamped
+     * before the insert so the row is never briefly 'ready' without a database.
+     */
+    protected function stampProvisioningStatus(array $data): array
     {
-        if (!empty($data['id'])) {
-            $tenant = $this->find((int) $data['id']);
-
-            if ($tenant !== null) {
-                $config  = config(\nuelcyoung\tenantable\Config\Tenantable::class);
-                $manager = new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
-                    $config->separateDatabasePerTenant,
-                    $config->defaultDatabaseGroup,
-                );
-                $manager->provisionTenant($tenant);
-
-                \CodeIgniter\Events\Events::trigger('tenantCreated', new TenantCreated(
-                    (int) $data['id'],
-                    $tenant
-                ));
-            }
+        if (! $this->tenantableConfig()->provisionAsync) {
+            return $data;
         }
+
+        if (! isset($data['data']) || ! is_array($data['data'])) {
+            return $data;
+        }
+
+        // An explicit status from the caller wins: imports and fixtures
+        // legitimately insert already-provisioned tenants.
+        $data['data']['status'] ??= self::STATUS_PROVISIONING;
 
         return $data;
     }
 
+    protected function dispatchCreated(array $data): array
+    {
+        if (empty($data['id'])) {
+            return $data;
+        }
+
+        $tenant = $this->find((int) $data['id']);
+
+        if ($tenant === null) {
+            return $data;
+        }
+
+        $config = $this->tenantableConfig();
+
+        if ($config->provisionAsync && $this->queueProvisioning((int) $data['id'])) {
+            // The job provisions, flips the status, and fires tenantCreated
+            // once the tenant can serve traffic.
+            return $data;
+        }
+
+        $manager = new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
+            $config->isDatabaseIsolation(),
+            $config->defaultDatabaseGroup,
+        );
+        $manager->provisionTenant($tenant);
+
+        \CodeIgniter\Events\Events::trigger('tenantCreated', new TenantCreated(
+            (int) $data['id'],
+            $tenant
+        ));
+
+        return $data;
+    }
+
+    /**
+     * The package configuration. Overridable so provisioning behaviour can
+     * be driven without publishing a config file (the bootstrappers' seam).
+     */
+    protected function tenantableConfig(): PackageConfig
+    {
+        return TenantableConfig::get();
+    }
+
+    /** The queue provisioning jobs are pushed onto. */
+    protected function provisioningQueue(): TenantableQueue
+    {
+        return new TenantableQueue();
+    }
+
+    /**
+     * Hand provisioning to the queue; false means "provision inline instead",
+     * so a failed push never leaves the tenant stuck in 'provisioning'.
+     */
+    private function queueProvisioning(int $tenantId): bool
+    {
+        try {
+            $pushed = $this->provisioningQueue()->pushCentral(
+                \nuelcyoung\tenantable\Jobs\ProvisionTenantJob::QUEUE,
+                \nuelcyoung\tenantable\Jobs\ProvisionTenantJob::NAME,
+                ['tenant_id' => $tenantId]
+            );
+        } catch (\Throwable $e) {
+            $pushed = false;
+
+            log_message(
+                'error',
+                'Tenantable: $provisionAsync is enabled but tenant ' . $tenantId . ' could not be '
+                . 'queued (' . $e->getMessage() . '). Provisioning inline instead.'
+            );
+        }
+
+        if (! $pushed) {
+            $this->markStatus($tenantId, self::STATUS_READY);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Set a tenant's provisioning status without firing the update pipeline:
+     * update() would emit events and invalidate caches at every step.
+     */
+    public function markStatus(int $tenantId, string $status): bool
+    {
+        if (! in_array($status, [self::STATUS_READY, self::STATUS_PROVISIONING, self::STATUS_FAILED], true)) {
+            throw new \InvalidArgumentException("Tenantable: unknown tenant status '{$status}'.");
+        }
+
+        $updated = $this->db->table($this->table)
+            ->where('id', $tenantId)
+            ->update(['status' => $status, 'updated_at' => date('Y-m-d H:i:s')]);
+
+        if ($updated) {
+            // A request during provisioning cached the row as not-ready; that
+            // entry must go or the tenant stays unreachable until the TTL ends.
+            $this->flushResolverCacheFor($tenantId);
+        }
+
+        return (bool) $updated;
+    }
+
+    private function flushResolverCacheFor(int $tenantId): void
+    {
+        $tenant = $this->find($tenantId);
+
+        if ($tenant === null) {
+            return;
+        }
+
+        $cache = TenantResolverCache::getInstance();
+
+        if (! empty($tenant['domain'])) {
+            $cache->flushHost((string) $tenant['domain']);
+        }
+
+        if (empty($tenant['subdomain'])) {
+            return;
+        }
+
+        $subdomain = (string) $tenant['subdomain'];
+        $cache->flushSubdomain($subdomain);
+
+        // Cached under the full hostname on every central domain, not just the
+        // primary one; a cache-wide flush would drop every other tenant too.
+        foreach (TenantableConfig::get()->centralDomains() as $domain) {
+            $cache->flushHost("{$subdomain}.{$domain}");
+        }
+    }
+
     protected function captureBeforeUpdate(array $data): array
     {
+        if (empty($data['id'])) {
+            // Bulk updates have no row id, so flush everything instead.
+            TenantResolverCache::getInstance()->flush();
+        }
+
         if (!empty($data['id'])) {
             $tenant = $this->find((int) $data['id']);
             if ($tenant !== null) {
@@ -145,6 +293,10 @@ class TenantModel extends GlobalModel
 
     protected function captureBeforeDelete(array $data): array
     {
+        if (empty($data['id'])) {
+            TenantResolverCache::getInstance()->flush();
+        }
+
         if (!empty($data['id'])) {
             $tenant = $this->find((int) $data['id']);
             if ($tenant !== null) {
@@ -169,56 +321,83 @@ class TenantModel extends GlobalModel
         return $data;
     }
 
-    public function getActiveTenants(): array
-    {
-        return $this->where('is_active', true)->findAll();
-    }
+    // CI4 < 4.5 ignores casts for settings, so encode/decode JSON manually.
+    // On 4.5+ these no-op (native cast handles it).
 
-    public function findBySubdomain(string $subdomain): ?array
+    protected function encodeSettings(array $data): array
     {
-        return $this->where('subdomain', $subdomain)->first();
-    }
-
-    public function findByDomain(string $domain): ?array
-    {
-        return $this->where('domain', $domain)->first();
-    }
-
-    public function subdomainExists(string $subdomain, ?int $excludeId = null): bool
-    {
-        $builder = $this->where('subdomain', $subdomain);
-
-        if ($excludeId !== null) {
-            $builder->where('id !=', $excludeId);
+        if (self::modelCastsSupported() || ! isset($data['data']['settings'])) {
+            return $data;
         }
 
-        return $builder->countAllResults() > 0;
+        if (is_array($data['data']['settings'])) {
+            $data['data']['settings'] = json_encode($data['data']['settings']);
+        }
+
+        return $data;
     }
 
-    public function findWithSettings(int $id): ?array
+    protected function decodeSettings(array $data): array
     {
-        return $this->find($id);
+        if (self::modelCastsSupported() || ! isset($data['data'])) {
+            return $data;
+        }
+
+        if (($data['singleton'] ?? false) === true) {
+            $data['data'] = $this->decodeSettingsRow($data['data']);
+        } elseif (is_array($data['data'])) {
+            foreach ($data['data'] as $key => $row) {
+                $data['data'][$key] = $this->decodeSettingsRow($row);
+            }
+        }
+
+        return $data;
     }
 
-    public function updateSettings(int $id, array $settings): bool
+    /**
+     * @param mixed $row
+     * @return mixed
+     */
+    private function decodeSettingsRow($row)
     {
-        return $this->update($id, ['settings' => $settings]);
+        if (is_array($row) && isset($row['settings']) && is_string($row['settings'])) {
+            $decoded = json_decode($row['settings'], true);
+            if (is_array($decoded)) {
+                $row['settings'] = $decoded;
+            }
+        }
+
+        return $row;
     }
 
-    public function getDisplayName(array $tenant): string
+    private static function modelCastsSupported(): bool
     {
-        return $tenant['name'] ?? $tenant['subdomain'] ?? 'Unknown';
+        return version_compare(\CodeIgniter\CodeIgniter::CI_VERSION, '4.5.0', '>=');
     }
 
     public static function getDatabaseName(array $tenant): string
     {
-        $config    = config(\nuelcyoung\tenantable\Config\Tenantable::class);
-        $generator = $config->databaseNameGenerator;
+        $config    = TenantableConfig::get();
+        $generator = $config->databaseNameGenerator ?? null;
 
-        if (is_callable($generator)) {
-            return $generator($tenant);
+        $name = is_callable($generator)
+            ? (string) $generator($tenant)
+            : 'tenant_' . ($tenant['id'] ?? '');
+
+        return self::assertValidDatabaseName($name);
+    }
+
+    /** Restrict database names to [A-Za-z0-9_]{1,64}. */
+    public static function assertValidDatabaseName(string $name): string
+    {
+        if (preg_match('/^[A-Za-z0-9_]{1,64}$/', $name) !== 1) {
+            throw new \InvalidArgumentException(
+                "Tenantable: refusing to use unsafe tenant database name '{$name}'. " .
+                'Database names must match [A-Za-z0-9_] and be 1-64 characters. ' .
+                'Check your Config\\Tenantable::$databaseNameGenerator.'
+            );
         }
 
-        return 'tenant_' . $tenant['id'];
+        return $name;
     }
 }

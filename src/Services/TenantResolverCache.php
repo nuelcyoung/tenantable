@@ -15,22 +15,14 @@ namespace nuelcyoung\tenantable\Services;
 
 use nuelcyoung\tenantable\Models\TenantDomainModel;
 use nuelcyoung\tenantable\Models\TenantModel;
+use nuelcyoung\tenantable\Support\TenantableConfig;
 
-/**
- * TenantResolverCache
- *
- * Caches domain-to-tenant resolution to avoid repeated DB queries.
- * Uses the global CI4 cache (not tenant-prefixed) since this runs
- * before tenant context exists.
- */
+/** Caches domain-to-tenant resolution. Uses global cache (pre-tenant). */
 class TenantResolverCache
 {
     private static ?self $instance = null;
 
-    /**
-     * Per-request memoization of the version counter to avoid a second
-     * cache round-trip on every resolveByHost call.
-     */
+    /** Memoized version counter to avoid extra cache round-trips. */
     private ?int $versionCache = null;
 
     public static function getInstance(): self
@@ -46,17 +38,18 @@ class TenantResolverCache
         self::$instance = null;
     }
 
-    /**
-     * Resolve tenant by host, using cache first.
-     *
-     * @return array|null ['tenant_id' => int, 'is_active' => bool, 'tenant' => array] or null
-     */
+    /** Resolve tenant by host via cache. */
     public function resolveByHost(string $host): ?array
     {
-        $host     = strtolower($host);
+        $host = TenantManager::getInstance()->normalizeHost($host);
+
+        if ($host === null) {
+            return null;
+        }
+
         $config   = $this->getConfig();
-        $cache    = \Config\Services::cache();
-        $ttl      = $config->resolverCacheTtl ?? 300;
+        $cache    = $this->getCache();
+        $ttl      = $config->resolverCacheTtl;
         $cacheKey = $this->buildKey($host);
 
         $cached = $cache->get($cacheKey);
@@ -78,44 +71,38 @@ class TenantResolverCache
         return $result;
     }
 
-    /**
-     * Flush all resolver cache keys.
-     *
-     * Implemented via a version counter that's part of every cache key —
-     * bumping the version makes all existing keys unreachable in O(1)
-     * without scanning, which CI4 cache drivers don't support.
-     */
+    /** Flush all keys via version bump (O(1), no scan). */
     public function flush(): void
     {
         $config = $this->getConfig();
-        $cache  = \Config\Services::cache();
-        $prefix = $config->resolverCachePrefix ?? 'tenant_resolver';
+        $cache  = $this->getCache();
+        $prefix = $config->resolverCachePrefix;
 
         $version = (int) ($cache->get("{$prefix}_version") ?? 0);
         $cache->save("{$prefix}_version", $version + 1, 0);
         $this->versionCache = $version + 1;
     }
 
-    /**
-     * Flush resolver cache for a specific host (uses current version).
-     */
+    /** Flush cache for a specific host. */
     public function flushHost(string $host): void
     {
-        $cache = \Config\Services::cache();
+        $host = TenantManager::getInstance()->normalizeHost($host);
+
+        if ($host === null) {
+            return;
+        }
+
+        $cache = $this->getCache();
         $cache->delete($this->buildKey($host));
     }
 
-    /**
-     * Resolve tenant by subdomain, using cache first.
-     *
-     * @return array|null Same shape as resolveByHost
-     */
+    /** Resolve tenant by subdomain via cache. */
     public function resolveBySubdomain(string $subdomain): ?array
     {
-        $subdomain = strtolower($subdomain);
+        $subdomain = strtolower(trim($subdomain));
         $config    = $this->getConfig();
-        $cache     = \Config\Services::cache();
-        $ttl       = $config->resolverCacheTtl ?? 300;
+        $cache     = $this->getCache();
+        $ttl       = $config->resolverCacheTtl;
         $cacheKey  = $this->buildSubdomainKey($subdomain);
 
         $cached = $cache->get($cacheKey);
@@ -140,18 +127,16 @@ class TenantResolverCache
 
     public function flushSubdomain(string $subdomain): void
     {
-        $cache = \Config\Services::cache();
+        $subdomain = strtolower(trim($subdomain));
+        $cache = $this->getCache();
         $cache->delete($this->buildSubdomainKey($subdomain));
     }
 
-    /**
-     * Build a versioned cache key. Bumping the version (via flush) makes
-     * every previously-cached host unreachable atomically.
-     */
+    /** Build versioned cache key. */
     protected function buildKey(string $host): string
     {
         $config  = $this->getConfig();
-        $prefix  = $config->resolverCachePrefix ?? 'tenant_resolver';
+        $prefix  = $config->resolverCachePrefix;
         $version = $this->getVersion($prefix);
 
         return "{$prefix}_v{$version}_host_" . md5(strtolower($host));
@@ -160,7 +145,7 @@ class TenantResolverCache
     protected function buildSubdomainKey(string $subdomain): string
     {
         $config  = $this->getConfig();
-        $prefix  = $config->resolverCachePrefix ?? 'tenant_resolver';
+        $prefix  = $config->resolverCachePrefix;
         $version = $this->getVersion($prefix);
 
         return "{$prefix}_v{$version}_sub_" . md5(strtolower($subdomain));
@@ -172,7 +157,7 @@ class TenantResolverCache
             return $this->versionCache;
         }
 
-        $cache   = \Config\Services::cache();
+        $cache   = $this->getCache();
         $version = (int) ($cache->get("{$prefix}_version") ?? 0);
 
         return $this->versionCache = $version;
@@ -180,9 +165,13 @@ class TenantResolverCache
 
     protected function resolveFromDatabase(string $host): ?array
     {
-        // Try tenant_domains first
         $domainModel = new TenantDomainModel();
-        $domainRow   = $domainModel->where('domain', $host)->first();
+
+        $domainRow = $domainModel
+            ->where('domain', TenantDomainModel::normalizeDomain($host))
+            ->where('is_verified', 1)
+            ->where('verified_at IS NOT NULL')
+            ->first();
 
         if ($domainRow !== null) {
             $tenant = (new TenantModel())->find((int) $domainRow['tenant_id']);
@@ -191,20 +180,10 @@ class TenantResolverCache
             }
         }
 
-        // Fallback to tenants.domain (deprecated)
-        $tenant = (new TenantModel())->where('domain', $host)->first();
-
-        if ($tenant !== null) {
-            return $this->buildEntry($tenant);
-        }
-
         return null;
     }
 
-    /**
-     * Build a cache entry from a tenant row. Carrying the full row lets
-     * callers populate TenantManager without a second DB lookup.
-     */
+    /** Build cache entry. Carries full row to skip second DB lookup. */
     protected function buildEntry(array $tenant): array
     {
         return [
@@ -216,6 +195,33 @@ class TenantResolverCache
 
     protected function getConfig(): \nuelcyoung\tenantable\Config\Tenantable
     {
-        return config(\nuelcyoung\tenantable\Config\Tenantable::class);
+        return TenantableConfig::get();
     }
+
+    /**
+     * Resolver cache must never inherit the active tenant's application
+     * cache prefix. Use a private non-shared handler with a stable namespace.
+     */
+    protected function getCache(): object
+    {
+        if (isset($this->cache)) {
+            return $this->cache;
+        }
+
+        $config = config('Cache');
+
+        if (is_object($config)) {
+            $config = clone $config;
+
+            if (property_exists($config, 'prefix')) {
+                $config->prefix = 'tenantable_resolver_';
+            }
+        }
+
+        $this->cache = \Config\Services::cache($config, false);
+
+        return $this->cache;
+    }
+
+    private ?object $cache = null;
 }

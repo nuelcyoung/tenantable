@@ -15,6 +15,8 @@ namespace nuelcyoung\tenantable\Bootstrap;
 
 use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Services\TenantTableManager;
+use nuelcyoung\tenantable\Support\SharedInfrastructure;
+use nuelcyoung\tenantable\Support\TenantableConfig;
 
 class TenantBootstrap
 {
@@ -49,14 +51,34 @@ class TenantBootstrap
             return $this;
         }
 
+        // Before any tenant state is touched: an unsafe multi-node deployment
+        // must not serve traffic at all.
+        SharedInfrastructure::assertSafe();
+
         $bootstrappers = $this->resolveBootstrappers();
 
         foreach ($bootstrappers as $name => $class) {
-            if (is_string($class) && class_exists($class)) {
-                $this->registerSystem($name, new $class());
-            } elseif ($class instanceof TenantAwareInterface) {
+            if ($class instanceof TenantAwareInterface) {
                 $this->registerSystem($name, $class);
+                continue;
             }
+
+            if (! is_string($class)) {
+                log_message('error', "TenantBootstrap: bootstrapper '{$name}' is not a class name or TenantAwareInterface.");
+                continue;
+            }
+
+            if (! class_exists($class)) {
+                log_message('error', "TenantBootstrap: bootstrapper class '{$class}' (for '{$name}') does not exist.");
+                continue;
+            }
+
+            if (! is_subclass_of($class, TenantAwareInterface::class)) {
+                log_message('error', "TenantBootstrap: bootstrapper '{$class}' (for '{$name}') must implement TenantAwareInterface; skipping.");
+                continue;
+            }
+
+            $this->registerSystem($name, new $class());
         }
 
         $this->initialized = true;
@@ -74,11 +96,12 @@ class TenantBootstrap
             'session'  => Systems\SessionSystem::class,
             'logging'  => Systems\LoggingSystem::class,
             'config'   => Systems\ConfigSystem::class,
+            'queue'    => Systems\QueueSystem::class,
             'redis'    => RedisSystem::class,
         ];
 
         try {
-            $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+            $config = TenantableConfig::get();
             if (!empty($config->bootstrappers) && is_array($config->bootstrappers)) {
                 return $config->bootstrappers;
             }
@@ -126,11 +149,25 @@ class TenantBootstrap
             try {
                 $system->boot($tenantId, $tenant);
             } catch (\Throwable $e) {
-                $this->bootErrors[$name] = $e->getMessage();
+                $errorMessage = $e->getMessage();
+                $this->bootErrors[$name] = $errorMessage;
                 log_message('error', "TenantBootstrap: System '{$name}' failed to boot: {$e->getMessage()}", [
                     'exception' => $e,
                     'tenant_id' => $tenantId,
                 ]);
+
+                // A partial switch is dangerous. Roll everything back.
+                $this->shutdown();
+                $this->bootErrors[$name] = $errorMessage;
+                TenantManager::getInstance()->clear();
+
+                throw new \RuntimeException(
+                    "TenantBootstrap: unable to initialize tenant context for tenant " .
+                    ($tenantId === null ? 'none' : (string) $tenantId) .
+                    " because system '{$name}' failed.",
+                    0,
+                    $e,
+                );
             }
         }
     }
@@ -160,6 +197,15 @@ class TenantBootstrap
                 log_message('error', "TenantBootstrap::runCentral: '{$name}' failed: {$e->getMessage()}", [
                     'exception' => $e,
                 ]);
+
+                $this->shutdown();
+                $this->restoreTenantAfterCentralFailure($previousTenantId);
+
+                throw new \RuntimeException(
+                    "TenantBootstrap::runCentral: unable to enter central context because system '{$name}' failed.",
+                    0,
+                    $e,
+                );
             }
         }
 
@@ -168,17 +214,37 @@ class TenantBootstrap
         try {
             return $callback();
         } finally {
-            $this->bootForTenant($previousTenantId);
+            try {
+                $this->shutdown();
+                $this->bootForTenant($previousTenantId);
+            } catch (\Throwable $e) {
+                $tenantManager->clear();
+
+                throw new \RuntimeException(
+                    "TenantBootstrap::runCentral: failed to restore tenant {$previousTenantId}.",
+                    0,
+                    $e,
+                );
+            }
         }
     }
 
-    /**
-     * Shutdown all systems.
-     *
-     * Note: The TenancyEnded event should be dispatched BEFORE calling
-     * this method so listeners can access tenant state before systems
-     * are torn down.
-     */
+    private function restoreTenantAfterCentralFailure(int $tenantId): void
+    {
+        try {
+            $this->bootForTenant($tenantId);
+        } catch (\Throwable $restoreError) {
+            TenantManager::getInstance()->clear();
+
+            throw new \RuntimeException(
+                "TenantBootstrap::runCentral: central bootstrap failed and tenant {$tenantId} could not be restored.",
+                0,
+                $restoreError,
+            );
+        }
+    }
+
+    /** Shutdown all systems. Dispatch TenancyEnded BEFORE calling this. */
     public function shutdown(): void
     {
         foreach ($this->systems as $name => $system) {

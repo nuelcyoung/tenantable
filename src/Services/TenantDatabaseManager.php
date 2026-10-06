@@ -15,11 +15,15 @@ namespace nuelcyoung\tenantable\Services;
 
 use CodeIgniter\Database\BaseConnection;
 use CodeIgniter\Database\Config as DbConnectionFactory;
-use CodeIgniter\Database\ConnectionInterface;
 use Config\Database as DbConfig;
+use nuelcyoung\tenantable\Support\FrameworkState;
+use nuelcyoung\tenantable\Support\TenantableConfig;
 
 class TenantDatabaseManager
 {
+    /** Tracks per-tenant migration state in prefix mode. */
+    public const TENANT_MIGRATIONS_TABLE = 'tenant_migrations';
+
     protected ?array $tenantDbConfig = null;
     protected ?array $defaultSnapshot = null;
     protected bool $swapped = false;
@@ -54,18 +58,29 @@ class TenantDatabaseManager
             $this->defaultSnapshot = (array) ($dbConfig->{$group} ?? []);
         }
 
-        self::ensureCentralGroup($this->defaultSnapshot);
+        try {
+            self::ensureCentralGroup($this->defaultSnapshot);
 
-        $tenantConfig = $this->buildTenantConfig($dbName, $this->defaultSnapshot ?? []);
+            $tenantConfig = $this->buildTenantConfig($dbName, $this->defaultSnapshot ?? []);
 
-        $this->evictCachedConnection($group);
-        $dbConfig->{$group} = $tenantConfig;
+            $this->evictCachedConnection($group);
+            $dbConfig->{$group} = $tenantConfig;
 
-        $this->connections[$group] = DbConfig::connect($group, true);
-        $this->tenantDbConfig       = $tenantConfig;
-        $this->swapped              = true;
+            $this->connections[$group] = DbConfig::connect($group, true);
+            $this->tenantDbConfig       = $tenantConfig;
+            $this->swapped              = true;
 
-        return true;
+            return true;
+        } catch (\Throwable $e) {
+            // Revert to central on failure. Never leave a partial tenant config.
+            $this->evictCachedConnection($group);
+            $dbConfig->{$group} = $this->defaultSnapshot ?? [];
+            $this->tenantDbConfig = null;
+            $this->swapped        = false;
+            unset($this->connections[$group]);
+
+            throw $e;
+        }
     }
 
     public function switchToTenant(string $subdomain): bool
@@ -74,6 +89,12 @@ class TenantDatabaseManager
         $tenant      = $tenantModel->where('subdomain', $subdomain)->first();
 
         if ($tenant === null) {
+            return false;
+        }
+
+        // CI4 < 4.5 stores is_active as int.
+        if (empty($tenant['is_active'])) {
+            log_message('warning', "Tenantable: refusing to switch to inactive tenant '{$subdomain}'.");
             return false;
         }
 
@@ -132,7 +153,7 @@ class TenantDatabaseManager
 
     private static ?array $centralConfig = null;
 
-    public static function getCentralConnection(): ConnectionInterface
+    public static function getCentralConnection(): BaseConnection
     {
         self::ensureCentralGroup();
 
@@ -144,7 +165,7 @@ class TenantDatabaseManager
     public function testConnection(array $config): bool
     {
         try {
-            $db = DbConfig::connect($config, false);
+            $db = DbConnectionFactory::connect($config, false);
             return $db->connect() !== false;
         } catch (\Throwable $e) {
             return false;
@@ -153,7 +174,16 @@ class TenantDatabaseManager
 
     public function provisionTenant(array $tenant): bool
     {
-        $config = config(\nuelcyoung\tenantable\Config\Tenantable::class);
+        $config = TenantableConfig::get();
+
+        if ($config->resolvedIsolationMode() === 'prefix') {
+            if (! $config->autoMigrateTenant) {
+                log_message('info', 'Tenantable: autoMigrateTenant disabled, skipping prefix provisioning.');
+                return false;
+            }
+
+            return $this->provisionPrefixTenant($tenant, $config);
+        }
 
         if (! $this->shouldAutoProvision($config)) {
             log_message('debug', 'Tenantable: auto-provisioning skipped.');
@@ -191,33 +221,301 @@ class TenantDatabaseManager
 
     protected function resolveTenantMigrationNamespaces(\nuelcyoung\tenantable\Config\Tenantable $config): array
     {
-        $namespaces = [];
-
-        if (! empty($config->tenantMigrationsNamespace)) {
-            $namespaces[] = $config->tenantMigrationsNamespace;
-        }
-
-        foreach ($config->tenantMigrationsNamespaces as $ns) {
-            if (! empty($ns) && ! in_array($ns, $namespaces, true)) {
-                $namespaces[] = $ns;
-            }
-        }
-
-        return $namespaces;
+        return $config->tenantMigrationNamespaces();
     }
 
+    /** Create a tenant database. */
     public function createDatabase(string $databaseName): bool
     {
-        try {
-            $base = $this->getDefaultGroupConfig();
-            $base['database'] = '';
+        $databaseName = \nuelcyoung\tenantable\Models\TenantModel::assertValidDatabaseName($databaseName);
 
-            $admin   = \Config\Database::connect($base, false);
-            $escaped = str_replace('`', '``', $databaseName);
-            $admin->query("CREATE DATABASE IF NOT EXISTS `{$escaped}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        $admin = null;
+
+        try {
+            $base             = $this->getDefaultGroupConfig();
+            $configuredDriver = strtolower((string) ($base['DBDriver'] ?? ''));
+
+            if ($configuredDriver === 'sqlite3') {
+                // SQLite databases are files; no admin connection needed.
+                return $this->createSqliteDatabase($databaseName);
+            }
+
+            if (in_array($configuredDriver, ['mysqli', 'mysql', 'mariadb'], true)) {
+                // MySQL lets you connect without a database selected.
+                $base['database'] = '';
+            } elseif ($configuredDriver === 'postgre') {
+                // PostgreSQL needs an existing database to connect to first.
+                $base['database'] = $this->getPostgreAdminDatabase();
+            } else {
+                log_message(
+                    'error',
+                    "Tenantable: automatic CREATE DATABASE is only supported on MySQL/MariaDB or PostgreSQL; " .
+                    "driver '" . ($configuredDriver === '' ? '(unknown)' : $configuredDriver) . "' is not supported. " .
+                    "Create '{$databaseName}' manually."
+                );
+                return false;
+            }
+
+            $admin  = DbConnectionFactory::connect($base, false);
+            $driver = strtolower($admin->DBDriver);
+
+            if ($driver === 'postgre') {
+                if (! $this->createPostgreDatabase($admin, $databaseName)) {
+                    log_message('error', "Tenantable: CREATE DATABASE '{$databaseName}' failed.");
+                    return false;
+                }
+            } elseif (in_array($driver, ['mysqli', 'mysql', 'mariadb'], true)) {
+                $escaped = str_replace('`', '``', $databaseName);
+                $admin->query("CREATE DATABASE IF NOT EXISTS `{$escaped}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+            } else {
+                log_message(
+                    'error',
+                    "Tenantable: automatic CREATE DATABASE is only supported on MySQL/MariaDB or PostgreSQL; " .
+                    "driver '" . ($driver === '' ? '(unknown)' : $driver) . "' is not supported. " .
+                    "Create '{$databaseName}' manually."
+                );
+                return false;
+            }
 
             log_message('info', "Tenantable: database '{$databaseName}' created.");
             return true;
+        } catch (\Throwable $e) {
+            log_message('error', "Tenantable: CREATE DATABASE '{$databaseName}' failed: {$e->getMessage()}");
+            return false;
+        } finally {
+            if ($admin instanceof BaseConnection) {
+                $admin->close();
+            }
+        }
+    }
+
+    /** The PostgreSQL database used during provisioning. */
+    protected function getPostgreAdminDatabase(): string
+    {
+        $database = trim(TenantableConfig::get()->postgresAdminDatabase);
+
+        return $database === '' ? 'postgres' : $database;
+    }
+
+    /** Create a PostgreSQL database. Falls back to checking if it already exists. */
+    protected function createPostgreDatabase(BaseConnection $admin, string $databaseName): bool
+    {
+        try {
+            $forge = (new \CodeIgniter\Database\Database())->loadForge($admin);
+
+            if ($forge->createDatabase($databaseName, true)) {
+                return true;
+            }
+        } catch (\Throwable $e) {
+            // Another process may have created it first. Treat as success.
+            if ($this->postgreDatabaseExists($admin, $databaseName)) {
+                return true;
+            }
+
+            throw $e;
+        }
+
+        return $this->postgreDatabaseExists($admin, $databaseName);
+    }
+
+    protected function postgreDatabaseExists(BaseConnection $admin, string $databaseName): bool
+    {
+        try {
+            $result = $admin->query('SELECT 1 FROM pg_database WHERE datname = ?', [$databaseName]);
+
+            return $result !== false && $result->getRow() !== null;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Does a tenant database exist? SQLite checks the file; SQL drivers use an admin connection. */
+    public function databaseExists(string $databaseName): bool
+    {
+        $databaseName = \nuelcyoung\tenantable\Models\TenantModel::assertValidDatabaseName($databaseName);
+
+        $base   = $this->getDefaultGroupConfig();
+        $driver = strtolower((string) ($base['DBDriver'] ?? ''));
+
+        if ($driver === 'sqlite3') {
+            return is_file($this->sqliteDatabasePath($databaseName));
+        }
+
+        $admin = null;
+
+        try {
+            if (in_array($driver, ['mysqli', 'mysql', 'mariadb'], true)) {
+                $base['database'] = '';
+            } elseif ($driver === 'postgre') {
+                $base['database'] = $this->getPostgreAdminDatabase();
+            } else {
+                return false;
+            }
+
+            $admin = DbConnectionFactory::connect($base, false);
+            $actualDriver = strtolower($admin->DBDriver);
+
+            if ($actualDriver === 'postgre') {
+                return $this->postgreDatabaseExists($admin, $databaseName);
+            }
+
+            $escaped = str_replace('`', '``', $databaseName);
+            $result  = $admin->query(
+                "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '{$escaped}'"
+            );
+
+            return $result !== false && $result->getRow() !== null;
+        } catch (\Throwable $e) {
+            log_message('error', "Tenantable: databaseExists('{$databaseName}') failed: {$e->getMessage()}");
+            return false;
+        } finally {
+            if ($admin instanceof BaseConnection) {
+                $admin->close();
+            }
+        }
+    }
+
+    /**
+     * Delete a tenant database. Not wired into tenant deletion automatically;
+     * call it explicitly (e.g. from a tenantDeleted listener) to remove data.
+     */
+    public function deleteDatabase(string $databaseName): bool
+    {
+        $databaseName = \nuelcyoung\tenantable\Models\TenantModel::assertValidDatabaseName($databaseName);
+
+        $base   = $this->getDefaultGroupConfig();
+        $driver = strtolower((string) ($base['DBDriver'] ?? ''));
+
+        if ($driver === 'sqlite3') {
+            $path = $this->sqliteDatabasePath($databaseName);
+
+            if (! is_file($path)) {
+                return true;
+            }
+
+            if (@unlink($path)) {
+                log_message('info', "Tenantable: SQLite database '{$databaseName}' deleted.");
+                return true;
+            }
+
+            log_message('error', "Tenantable: cannot delete SQLite database '{$path}'.");
+            return false;
+        }
+
+        $admin = null;
+
+        try {
+            if (in_array($driver, ['mysqli', 'mysql', 'mariadb'], true)) {
+                $base['database'] = '';
+            } elseif ($driver === 'postgre') {
+                $base['database'] = $this->getPostgreAdminDatabase();
+            } else {
+                log_message('error', "Tenantable: deleting a tenant database is only supported on MySQL/MariaDB, PostgreSQL or SQLite.");
+                return false;
+            }
+
+            $admin = DbConnectionFactory::connect($base, false);
+            $actualDriver = strtolower($admin->DBDriver);
+
+            if ($actualDriver === 'postgre') {
+                // Connections to the target database block DROP; terminate them first.
+                $admin->query(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ? AND pid <> pg_backend_pid()",
+                    [$databaseName]
+                );
+                $forge = (new \CodeIgniter\Database\Database())->loadForge($admin);
+
+                if (! $forge->dropDatabase($databaseName)) {
+                    return $this->postgreDatabaseExists($admin, $databaseName) === false;
+                }
+
+                return true;
+            }
+
+            $escaped = str_replace('`', '``', $databaseName);
+            $admin->query("DROP DATABASE IF EXISTS `{$escaped}`");
+
+            return true;
+        } catch (\Throwable $e) {
+            log_message('error', "Tenantable: DROP DATABASE '{$databaseName}' failed: {$e->getMessage()}");
+            return false;
+        } finally {
+            if ($admin instanceof BaseConnection) {
+                $admin->close();
+            }
+        }
+    }
+
+    /** True when the default group uses the SQLite3 driver. */
+    public function isSqliteDriver(array $config): bool
+    {
+        return strtolower((string) ($config['DBDriver'] ?? '')) === 'sqlite3';
+    }
+
+    /** Directory holding tenant SQLite database files. */
+    public function sqliteDatabasesDirectory(): string
+    {
+        try {
+            $configured = TenantableConfig::get()->sqliteDatabasesPath;
+        } catch (\Throwable $e) {
+            $configured = null;
+        }
+
+        $directory = is_string($configured) && $configured !== ''
+            ? $configured
+            : rtrim(WRITEPATH, '/\\') . DIRECTORY_SEPARATOR . 'tenant_databases';
+
+        return rtrim($directory, '/\\');
+    }
+
+    /** File path for a tenant SQLite database. */
+    public function sqliteDatabasePath(string $databaseName): string
+    {
+        return $this->sqliteDatabasesDirectory()
+            . DIRECTORY_SEPARATOR
+            . \nuelcyoung\tenantable\Models\TenantModel::assertValidDatabaseName($databaseName)
+            . '.sqlite';
+    }
+
+    /** Point a connection config at a tenant database: name for SQL drivers, file path for SQLite. */
+    public function applyTenantDatabase(array $config, string $databaseName): array
+    {
+        $databaseName = \nuelcyoung\tenantable\Models\TenantModel::assertValidDatabaseName($databaseName);
+
+        $config['database'] = $this->isSqliteDriver($config)
+            ? $this->sqliteDatabasePath($databaseName)
+            : $databaseName;
+
+        return $config;
+    }
+
+    /** Create the SQLite file for a tenant database. Idempotent. */
+    protected function createSqliteDatabase(string $databaseName): bool
+    {
+        $path = $this->sqliteDatabasePath($databaseName);
+
+        try {
+            if (is_file($path)) {
+                return true;
+            }
+
+            $directory = dirname($path);
+
+            if (! is_dir($directory) && ! @mkdir($directory, 0755, true) && ! is_dir($directory)) {
+                log_message('error', "Tenantable: cannot create SQLite directory '{$directory}'.");
+                return false;
+            }
+
+            // A zero-byte file is a valid empty SQLite database; the driver
+            // writes the header on first connection.
+            if (@touch($path)) {
+                log_message('info', "Tenantable: SQLite database '{$databaseName}' created ('{$path}').");
+                return true;
+            }
+
+            log_message('error', "Tenantable: cannot create SQLite database '{$path}'.");
+
+            return false;
         } catch (\Throwable $e) {
             log_message('error', "Tenantable: CREATE DATABASE '{$databaseName}' failed: {$e->getMessage()}");
             return false;
@@ -228,26 +526,25 @@ class TenantDatabaseManager
     {
         $dbName = \nuelcyoung\tenantable\Models\TenantModel::getDatabaseName($tenant);
 
-        try {
-            $config             = $this->getDefaultGroupConfig();
-            $config['database'] = $dbName;
+        $db = null;
 
-            $db    = DbConfig::connect($config, false);
-            $forge = \Config\Database::forge($db);
+        try {
+            $config = $this->applyTenantDatabase($this->getDefaultGroupConfig(), $dbName);
+
+            $db    = DbConnectionFactory::connect($config, false);
+            $forge = (new \CodeIgniter\Database\Database())->loadForge($db);
 
             $this->ensureMigrationTable($db, $forge);
 
             $dir = $this->resolveNamespaceDirectory($namespace);
             if ($dir === null) {
                 log_message('warning', "Tenantable: cannot resolve '{$namespace}' to a directory.");
-                $db->close();
                 return true;
             }
 
             $files = glob($dir . DIRECTORY_SEPARATOR . '*.php');
             if (empty($files)) {
                 log_message('info', "Tenantable: no migration files in '{$dir}'.");
-                $db->close();
                 return true;
             }
 
@@ -258,8 +555,11 @@ class TenantDatabaseManager
             $ran = 0;
             foreach ($files as $file) {
                 $basename = pathinfo($file, PATHINFO_FILENAME);
+                // Match CI4's version format to avoid running twice.
+                $version  = $this->extractMigrationVersion($basename);
 
-                if (in_array($basename, $applied, true)) {
+                // Check both formats to avoid re-running after an upgrade.
+                if (in_array($version, $applied, true) || in_array($basename, $applied, true)) {
                     continue;
                 }
 
@@ -278,12 +578,15 @@ class TenantDatabaseManager
                     continue;
                 }
 
+                // Wrap in a transaction. MySQL DDL auto-commits anyway.
+                $db->transStart();
+
                 /** @var \CodeIgniter\Database\Migration $migration */
                 $migration = new $fqcn($forge);
                 $migration->up();
 
                 $db->table('migrations')->insert([
-                    'version'   => $basename,
+                    'version'   => $version,
                     'class'     => $fqcn,
                     'group'     => 'default',
                     'namespace' => $namespace,
@@ -291,11 +594,16 @@ class TenantDatabaseManager
                     'batch'     => $this->getNextBatch($db),
                 ]);
 
+                $db->transComplete();
+
+                if ($db->transStatus() === false) {
+                    log_message('error', "Tenantable: migration '{$className}' rolled back on '{$dbName}'.");
+                    return false;
+                }
+
                 $ran++;
                 log_message('info', "Tenantable: applied '{$className}' to '{$dbName}'.");
             }
-
-            $db->close();
 
             if ($ran > 0) {
                 log_message('info', "Tenantable: {$ran} migration(s) applied to '{$dbName}'.");
@@ -307,7 +615,230 @@ class TenantDatabaseManager
         } catch (\Throwable $e) {
             log_message('error', "Tenantable: migration for '{$dbName}' failed: {$e->getMessage()}");
             return false;
+        } finally {
+            // Close the per-tenant connection.
+            if ($db instanceof BaseConnection) {
+                $db->close();
+            }
         }
+    }
+
+    /** Create a tenant's prefixed tables. Called on creation or for backfills. */
+    public function provisionPrefixTenant(
+        array $tenant,
+        ?\nuelcyoung\tenantable\Config\Tenantable $config = null,
+        ?BaseConnection $db = null,
+    ): bool {
+        $config ??= TenantableConfig::get();
+
+        $namespaces = $config->tenantMigrationNamespaces();
+
+        if (empty($namespaces)) {
+            log_message('warning', 'Tenantable: no tenant migration namespaces configured.');
+            return true;
+        }
+
+        $allPassed = true;
+
+        foreach ($namespaces as $ns) {
+            if ($this->migrateTenantTables($tenant, $ns, $db) === null) {
+                $allPassed = false;
+            }
+        }
+
+        return $allPassed;
+    }
+
+    /**
+     * Run migrations for one tenant in prefix mode. The framework's
+     * MigrationRunner can't be used here: all tenants share one database.
+     */
+    public function migrateTenantTables(array $tenant, string $namespace, ?BaseConnection $db = null): ?int
+    {
+        $tenantId = (int) ($tenant['id'] ?? 0);
+
+        if ($tenantId <= 0) {
+            log_message('error', 'Tenantable: migrateTenantTables() requires a positive tenant id.');
+            return null;
+        }
+
+        $ownsConnection = $db === null;
+
+        try {
+            $db ??= \Config\Database::connect();
+            $forge = (new \CodeIgniter\Database\Database())->loadForge($db);
+
+            $this->ensureTenantMigrationsTable($db, $forge);
+
+            $files = $this->findTenantMigrationFiles($namespace);
+            if ($files === []) {
+                log_message('warning', "Tenantable: no migration files found for '{$namespace}'.");
+                return 0;
+            }
+
+            $applied = $this->getAppliedTenantMigrations($db, $tenantId, $namespace);
+
+            // Point the table manager at this tenant so migrations resolve correctly.
+            $tableManager      = TenantTableManager::getInstance();
+            $previousId        = $tableManager->getTenantId();
+            $previousSubdomain = $tableManager->getSubdomain();
+
+            $tableManager->setTenant($tenantId, isset($tenant['subdomain']) ? (string) $tenant['subdomain'] : null);
+
+            // Run unprefixed or Forge would prepend a second prefix on
+            // connections already bound to a prefix-aware model.
+            $previousPrefix = $db->getPrefix();
+
+            if ($previousPrefix !== '') {
+                $db->setPrefix('');
+            }
+
+            $ran = 0;
+
+            try {
+                foreach ($files as $file) {
+                    $basename = pathinfo($file, PATHINFO_FILENAME);
+                    // Match CI4's version format to avoid running twice.
+                    $version = $this->extractMigrationVersion($basename);
+
+                    if (in_array($version, $applied, true) || in_array($basename, $applied, true)) {
+                        continue;
+                    }
+
+                    $className = $this->extractClassName($file);
+                    if ($className === null) {
+                        log_message('warning', "Tenantable: no class found in '{$file}'.");
+                        continue;
+                    }
+
+                    $fqcn = rtrim($namespace, '\\') . '\\' . $className;
+
+                    require_once $file;
+
+                    if (! class_exists($fqcn, false)) {
+                        log_message('warning', "Tenantable: class '{$fqcn}' not found in '{$file}'.");
+                        continue;
+                    }
+
+                    // Wrap in a transaction. MySQL DDL auto-commits anyway.
+                    $db->transStart();
+
+                    /** @var \CodeIgniter\Database\Migration $migration */
+                    $migration = new $fqcn($forge);
+                    $migration->up();
+
+                    $db->table(self::TENANT_MIGRATIONS_TABLE)->insert([
+                        'tenant_id' => $tenantId,
+                        'version'   => $version,
+                        'class'     => $fqcn,
+                        'namespace' => $namespace,
+                        'time'      => time(),
+                        'batch'     => $this->getNextTenantBatch($db, $tenantId),
+                    ]);
+
+                    $db->transComplete();
+
+                    if ($db->transStatus() === false) {
+                        log_message('error', "Tenantable: prefix migration '{$className}' rolled back for tenant {$tenantId}.");
+                        return null;
+                    }
+
+                    $ran++;
+                    log_message('info', "Tenantable: applied '{$className}' for tenant {$tenantId} (prefix mode).");
+                }
+            } finally {
+                // Put back the caller's tenant context.
+                if ($previousId !== null) {
+                    $tableManager->setTenant($previousId, $previousSubdomain);
+                } else {
+                    $tableManager->clear();
+                }
+
+                // Restore the connection prefix suppressed above; for bound
+                // connections the manager restore already applied the right one.
+                if ($db->getPrefix() !== $previousPrefix) {
+                    $db->setPrefix($previousPrefix);
+                }
+            }
+
+            if ($ran > 0) {
+                log_message('info', "Tenantable: {$ran} prefix migration(s) applied for tenant {$tenantId}.");
+            }
+
+            return $ran;
+        } catch (\Throwable $e) {
+            log_message('error', "Tenantable: prefix migrations for tenant {$tenantId} failed: {$e->getMessage()}");
+            return null;
+        } finally {
+            if ($ownsConnection && $db instanceof BaseConnection) {
+                $db->close();
+            }
+        }
+    }
+
+    /** Sorted migration file paths for a namespace. */
+    public function findTenantMigrationFiles(string $namespace): array
+    {
+        $dir = $this->resolveNamespaceDirectory($namespace);
+        if ($dir === null) {
+            return [];
+        }
+
+        $files = glob($dir . DIRECTORY_SEPARATOR . '*.php');
+        if ($files === false) {
+            return [];
+        }
+
+        sort($files);
+
+        return $files;
+    }
+
+    protected function ensureTenantMigrationsTable(BaseConnection $db, \CodeIgniter\Database\Forge $forge): void
+    {
+        if ($db->tableExists(self::TENANT_MIGRATIONS_TABLE)) {
+            return;
+        }
+
+        $forge->addField([
+            'id'        => ['type' => 'BIGINT', 'constraint' => 20, 'unsigned' => true, 'auto_increment' => true],
+            'tenant_id' => ['type' => 'BIGINT', 'constraint' => 20, 'unsigned' => true, 'null' => false],
+            'version'   => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'class'     => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'namespace' => ['type' => 'VARCHAR', 'constraint' => 255, 'null' => false],
+            'time'      => ['type' => 'INT', 'constraint' => 11, 'null' => false],
+            'batch'     => ['type' => 'INT', 'constraint' => 11, 'unsigned' => true, 'null' => false],
+        ]);
+        $forge->addKey('id', true);
+        $forge->addKey(['tenant_id', 'namespace']);
+        $forge->createTable(self::TENANT_MIGRATIONS_TABLE, true);
+    }
+
+    protected function getAppliedTenantMigrations(BaseConnection $db, int $tenantId, string $namespace): array
+    {
+        if (! $db->tableExists(self::TENANT_MIGRATIONS_TABLE)) {
+            return [];
+        }
+
+        return array_column(
+            $db->table(self::TENANT_MIGRATIONS_TABLE)
+               ->where('tenant_id', $tenantId)
+               ->where('namespace', $namespace)
+               ->get()
+               ->getResultArray(),
+            'version'
+        );
+    }
+
+    protected function getNextTenantBatch(BaseConnection $db, int $tenantId): int
+    {
+        $result = $db->table(self::TENANT_MIGRATIONS_TABLE)
+            ->selectMax('batch')
+            ->where('tenant_id', $tenantId)
+            ->get()
+            ->getRow();
+
+        return ((int) ($result->batch ?? 0)) + 1;
     }
 
     protected function resolveNamespaceDirectory(string $namespace): ?string
@@ -428,12 +959,7 @@ class TenantDatabaseManager
             return false;
         }
 
-        $mode = $config->isolationMode;
-        if ($mode === null) {
-            $mode = $config->separateDatabasePerTenant ? 'database' : 'row';
-        }
-
-        return $mode === 'database';
+        return $config->isDatabaseIsolation();
     }
 
     public function getDefaultGroupConfig(): array
@@ -446,31 +972,26 @@ class TenantDatabaseManager
 
     protected function buildTenantConfig(string $databaseName, array $base): array
     {
-        $config             = $base;
-        $config['database'] = $databaseName;
-
-        return $config;
+        return $this->applyTenantDatabase($base, $databaseName);
     }
 
+    /**
+     * Drop the shared connection for a group via FrameworkState; a stale one
+     * would keep serving the previous tenant's database.
+     */
     protected function evictCachedConnection(string $group): void
     {
-        try {
-            $existing = DbConfig::connect($group, true);
-            if ($existing instanceof BaseConnection) {
-                $existing->close();
-            }
-        } catch (\Throwable $e) {
+        FrameworkState::evictSharedDbConnection($group);
+    }
+
+    /** Extract the version from a migration filename. */
+    protected function extractMigrationVersion(string $basename): string
+    {
+        if (preg_match('/\A(\d{4}[_-]?\d{2}[_-]?\d{2}[_-]?\d{6})_(\w+)\z/', $basename, $m) === 1) {
+            return $m[1];
         }
 
-        try {
-            $ref       = new \ReflectionClass(DbConfig::class);
-            $prop      = $ref->getProperty('instances');
-            $prop->setAccessible(true);
-            $instances = (array) $prop->getValue();
-            unset($instances[$group]);
-            $prop->setValue(null, $instances);
-        } catch (\Throwable $e) {
-        }
+        return $basename;
     }
 
     protected function extractClassName(string $filePath): ?string

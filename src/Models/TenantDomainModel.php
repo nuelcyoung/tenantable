@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace nuelcyoung\tenantable\Models;
 
 use nuelcyoung\tenantable\Events\TenantDomainChanged;
+use nuelcyoung\tenantable\Services\TenantResolverCache;
 
 class TenantDomainModel extends GlobalModel
 {
@@ -48,11 +49,13 @@ class TenantDomainModel extends GlobalModel
     protected $validationRules = [
         'tenant_id' => 'required|integer',
         'domain'    => 'required|max_length[255]',
+        'ssl_state' => 'permit_empty|in_list[none,pending,active,failed]',
     ];
 
     protected $allowCallbacks = true;
+    protected $beforeInsert   = ['normalizeDomainBeforeWrite', 'forceUnverifiedOnInsert'];
     protected $afterInsert    = ['dispatchDomainCreated'];
-    protected $beforeUpdate   = ['captureBeforeUpdate'];
+    protected $beforeUpdate   = ['normalizeDomainBeforeWrite', 'protectVerificationState', 'captureBeforeUpdate'];
     protected $afterUpdate    = ['dispatchDomainUpdated'];
     protected $beforeDelete   = ['captureBeforeDelete'];
     protected $afterDelete    = ['dispatchDomainDeleted'];
@@ -63,26 +66,81 @@ class TenantDomainModel extends GlobalModel
     /** @var array<int, array> */
     private array $beforeDeleteSnapshots = [];
 
-    public function findByDomain(string $domain): ?array
+    private bool $allowVerificationStateChange = false;
+
+    /**
+     * Mark a domain verified after the application has proved ownership via
+     * DNS or HTTPS. Resolver lookups ignore all other rows.
+     */
+    public function markVerified(int $id): bool
     {
-        return $this->where('domain', $domain)->first();
+        $this->allowVerificationStateChange = true;
+
+        try {
+            return $this->update($id, [
+                'is_verified' => 1,
+                'verified_at' => date('Y-m-d H:i:s'),
+            ]);
+        } finally {
+            $this->allowVerificationStateChange = false;
+        }
     }
 
-    public function findByTenantId(int $tenantId): array
+    /** Normalize a DNS host and reject URLs, ports, IPs, and malformed labels. */
+    public static function normalizeDomain(string $domain): string
     {
-        return $this->where('tenant_id', $tenantId)->findAll();
+        $domain = rtrim(strtolower(trim($domain)), '.');
+
+        if ($domain === '' || strlen($domain) > 253 || filter_var($domain, FILTER_VALIDATE_IP) !== false) {
+            throw new \InvalidArgumentException("Tenantable: invalid custom domain '{$domain}'.");
+        }
+
+        foreach (explode('.', $domain) as $label) {
+            if ($label === '' || strlen($label) > 63
+                || preg_match('/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/', $label) !== 1) {
+                throw new \InvalidArgumentException("Tenantable: invalid custom domain '{$domain}'.");
+            }
+        }
+
+        return $domain;
     }
 
-    public function getPrimaryDomain(int $tenantId): ?array
+    protected function normalizeDomainBeforeWrite(array $data): array
     {
-        return $this->where('tenant_id', $tenantId)
-            ->where('is_primary', 1)
-            ->first();
+        if (isset($data['data']['domain'])) {
+            $data['data']['domain'] = self::normalizeDomain((string) $data['data']['domain']);
+        }
+
+        return $data;
     }
 
-    // -------------------------------------------------------------------------
+    protected function forceUnverifiedOnInsert(array $data): array
+    {
+        if (isset($data['data'])) {
+            $data['data']['is_verified'] = 0;
+            $data['data']['verified_at'] = null;
+        }
+
+        return $data;
+    }
+
+    protected function protectVerificationState(array $data): array
+    {
+        if ($this->allowVerificationStateChange || ! isset($data['data'])) {
+            return $data;
+        }
+
+        if (array_key_exists('domain', $data['data'])) {
+            $data['data']['is_verified'] = 0;
+            $data['data']['verified_at'] = null;
+        } else {
+            unset($data['data']['is_verified'], $data['data']['verified_at']);
+        }
+
+        return $data;
+    }
+
     // Event dispatchers
-    // -------------------------------------------------------------------------
 
     protected function dispatchDomainCreated(array $data): array
     {
@@ -110,6 +168,12 @@ class TenantDomainModel extends GlobalModel
 
     protected function captureBeforeUpdate(array $data): array
     {
+        if (empty($data['id'])) {
+            // Bulk updates do not provide a row id, so no after-event can
+            // identify the old host mapping. Flush the resolver namespace.
+            TenantResolverCache::getInstance()->flush();
+        }
+
         if (!empty($data['id'])) {
             $row = $this->find((int) $data['id']);
             if ($row !== null) {
@@ -154,6 +218,10 @@ class TenantDomainModel extends GlobalModel
 
     protected function captureBeforeDelete(array $data): array
     {
+        if (empty($data['id'])) {
+            TenantResolverCache::getInstance()->flush();
+        }
+
         if (!empty($data['id'])) {
             $row = $this->find((int) $data['id']);
             if ($row !== null) {

@@ -12,9 +12,7 @@ use nuelcyoung\tenantable\Support\InstallPatcher;
  */
 class InstallPatcherTest extends TestCase
 {
-    // =========================================================================
     // patchFilters
-    // =========================================================================
 
     public function testPatchFiltersAddsToCleanGlobals(): void
     {
@@ -29,11 +27,11 @@ class InstallPatcherTest extends TestCase
         $this->assertContains('after: tenant_security', $result['added']);
 
         $this->assertStringContainsString(
-            "'tenant_subdomain' => ['except' => ['health', 'api/*']]",
+            "'tenant_subdomain' => ['except' => ['health', '_health']]",
             $result['source'],
         );
         $this->assertStringContainsString(
-            "'tenant_security' => ['except' => ['health', 'api/*']]",
+            "'tenant_security' => ['except' => ['health', '_health']]",
             $result['source'],
         );
 
@@ -109,14 +107,12 @@ PHP;
         $this->assertValidPhp($result['source']);
     }
 
-    // =========================================================================
     // patchEvents
-    // =========================================================================
 
     public function testPatchEventsAddsPackageEventsCallAndUse(): void
     {
         $source = $this->cleanEventsFile();
-        $result = InstallPatcher::patchEvents($source, false);
+        $result = InstallPatcher::patchEvents($source);
 
         $this->assertTrue($result['changed']);
         $this->assertContains('PackageEvents::register()', $result['added']);
@@ -128,27 +124,25 @@ PHP;
         $this->assertValidPhp($result['source']);
     }
 
-    public function testPatchEventsAddsEarlyDetectionWhenRequested(): void
+    public function testPatchEventsDoesNotInjectEarlyDetectionListener(): void
     {
+        // Must not add a second EarlyTenantDetector listener.
         $source = $this->cleanEventsFile();
-        $result = InstallPatcher::patchEvents($source, true);
+        $result = InstallPatcher::patchEvents($source);
 
-        $this->assertTrue($result['changed']);
-        $this->assertContains('PackageEvents::register()', $result['added']);
-        $this->assertContains('EarlyTenantDetector pre_system listener', $result['added']);
-        $this->assertStringContainsString(
-            'use nuelcyoung\\tenantable\\Bootstrap\\EarlyTenantDetector;',
+        $this->assertNotContains('EarlyTenantDetector pre_system listener', $result['added']);
+        $this->assertStringNotContainsString('EarlyTenantDetector', $result['source']);
+        $this->assertStringNotContainsString(
+            "Events::on('pre_system', [EarlyTenantDetector::class",
             $result['source'],
         );
-        $this->assertStringContainsString("Events::on('pre_system'", $result['source']);
-        $this->assertValidPhp($result['source']);
     }
 
     public function testPatchEventsIsIdempotent(): void
     {
         $source = $this->cleanEventsFile();
-        $first  = InstallPatcher::patchEvents($source, true);
-        $second = InstallPatcher::patchEvents($first['source'], true);
+        $first  = InstallPatcher::patchEvents($source);
+        $second = InstallPatcher::patchEvents($first['source']);
 
         $this->assertTrue($first['changed']);
         $this->assertFalse($second['changed']);
@@ -168,7 +162,7 @@ use nuelcyoung\tenantable\Bootstrap\PackageEvents;
 PackageEvents::register();
 PHP;
 
-        $result = InstallPatcher::patchEvents($source, false);
+        $result = InstallPatcher::patchEvents($source);
 
         $this->assertFalse($result['changed']);
         $this->assertSame($source, $result['source']);
@@ -186,10 +180,9 @@ use CodeIgniter\Exceptions\FrameworkException;
 Events::on('pre_system', fn() => null);
 PHP;
 
-        $result = InstallPatcher::patchEvents($source, false);
+        $result = InstallPatcher::patchEvents($source);
 
         $this->assertTrue($result['changed']);
-        // Use statement order: existing uses then the new one.
         $packagePos = strpos($result['source'], 'use nuelcyoung');
         $eventsPos  = strpos($result['source'], 'use CodeIgniter\\Events\\Events;');
         $this->assertNotFalse($packagePos);
@@ -197,9 +190,7 @@ PHP;
         $this->assertGreaterThan($eventsPos, $packagePos);
     }
 
-    // =========================================================================
     // renderConfig
-    // =========================================================================
 
     public function testRenderConfigSubstitutesAllTokens(): void
     {
@@ -213,6 +204,7 @@ PHP;
         $this->assertStringContainsString('$separateDatabasePerTenant = false', $out);
         $this->assertStringContainsString("'tenant_subdomain'", $out);
         $this->assertStringContainsString("'off'", $out); // early detection off
+        $this->assertStringContainsString('$shipTenantSessionsTable = false', $out);
         $this->assertStringNotContainsString('{{', $out);
         $this->assertValidPhp($out);
     }
@@ -228,9 +220,46 @@ PHP;
         $this->assertStringContainsString("'domain'", $out); // early detection mirrors strategy
     }
 
-    // =========================================================================
+    public function testRenderConfigShipSessionsFlag(): void
+    {
+        $stub = file_get_contents(__DIR__ . '/../../src/stubs/Tenantable.config.stub');
+        $out  = InstallPatcher::renderConfig($stub, 'example.com', 'database', 'domain', true, true);
+
+        $this->assertStringContainsString('$shipTenantSessionsTable = true', $out);
+        $this->assertValidPhp($out);
+    }
+
+    public function testRenderConfigDisablesUnsupportedEarlyDetectionStrategy(): void
+    {
+        $stub = file_get_contents(__DIR__ . '/../../src/stubs/Tenantable.config.stub');
+        $this->assertNotFalse($stub);
+
+        $out = InstallPatcher::renderConfig($stub, 'example.com', 'row', 'path', true);
+
+        $this->assertStringContainsString("public string \$earlyDetectionStrategy = 'off'", $out);
+    }
+
+    public function testRenderConfigEscapesBaseDomainAsPhpLiteral(): void
+    {
+        $stub = file_get_contents(__DIR__ . '/../../src/stubs/Tenantable.config.stub');
+        $this->assertNotFalse($stub);
+
+        $out = InstallPatcher::renderConfig(
+            $stub,
+            "evil'; file_put_contents('pwned', 'yes'); //",
+            'row',
+            'subdomain',
+            false,
+        );
+
+        $this->assertValidPhp($out);
+        $this->assertStringNotContainsString(
+            "public string \$baseDomain = 'evil'; file_put_contents('pwned', 'yes');",
+            $out,
+        );
+    }
+
     // Fixtures
-    // =========================================================================
 
     private function cleanFiltersFile(): string
     {

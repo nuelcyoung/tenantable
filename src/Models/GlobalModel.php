@@ -13,16 +13,20 @@ declare(strict_types=1);
 
 namespace nuelcyoung\tenantable\Models;
 
-use CodeIgniter\Database\ConnectionInterface;
 use CodeIgniter\Model;
-use CodeIgniter\Validation\ValidationInterface;
 use nuelcyoung\tenantable\Services\TenantDatabaseManager;
 
+    /**
+     * Base model for central (non-tenant) tables. The shared default
+     * connection is swapped for the central one; injected connections and
+     * custom $DBGroup models are left alone.
+     */
 abstract class GlobalModel extends Model
 {
-    public function __construct(?ConnectionInterface $db = null, ?ValidationInterface $validation = null)
+    protected function initialize(): void
     {
-        $db ??= TenantDatabaseManager::getCentralConnection();
-        parent::__construct($db, $validation);
+        if ($this->DBGroup === null && $this->db === \Config\Database::connect()) {
+            $this->db = TenantDatabaseManager::getCentralConnection();
+        }
     }
 }

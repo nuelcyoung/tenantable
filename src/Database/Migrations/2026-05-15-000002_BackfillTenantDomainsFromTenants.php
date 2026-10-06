@@ -62,6 +62,6 @@ class BackfillTenantDomainsFromTenants extends Migration
 
     public function down(): void
     {
-        // No-op: we don't remove backfilled data on rollback
+        // we don't remove backfilled data on rollback
     }
 }

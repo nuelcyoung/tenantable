@@ -15,6 +15,7 @@ namespace nuelcyoung\tenantable\Database\Migrations;
 
 use CodeIgniter\Database\Migration;
 
+/** @noinspection PhpIllegalPsrClassPathInspection */
 class AlterTenantsIsActiveNotNull extends Migration
 {
     protected $DBGroup = 'default';

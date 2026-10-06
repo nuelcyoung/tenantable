@@ -16,9 +16,12 @@ namespace nuelcyoung\tenantable\Commands;
 use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
+use nuelcyoung\tenantable\Traits\NormalizesCliOptions;
 
 class TenantsMakeMigration extends BaseCommand
 {
+    use NormalizesCliOptions;
+
     protected $group       = 'Tenantable';
     protected $name        = 'tenants:make-migration';
     protected $description = 'Generate a tenant-scoped migration file.';
@@ -48,9 +51,9 @@ class TenantsMakeMigration extends BaseCommand
         }
 
         $config    = config(TenantableConfig::class);
-        $namespace = CLI::getOption('namespace');
+        $namespace = $this->cliOption('namespace');
 
-        if (! is_string($namespace) || $namespace === '') {
+        if ($namespace === null || $namespace === '') {
             $namespace = $config->tenantMigrationsNamespace;
         }
 
@@ -63,8 +66,19 @@ class TenantsMakeMigration extends BaseCommand
         }
 
         $namespace = trim($namespace, '\\');
-        $force     = (bool) CLI::getOption('force');
-        $table     = (string) (CLI::getOption('table') ?: $this->guessTable($name));
+
+        if (! $this->isValidNamespace($namespace)) {
+            CLI::error("Invalid namespace '{$namespace}'. Use a valid PHP namespace, e.g. App\\Database\\Migrations\\Tenant.");
+            return;
+        }
+
+        $force = $this->hasCliOption('force');
+        $table = $this->cliOption('table') ?: $this->guessTable($name);
+
+        if (! $this->isValidTableName($table)) {
+            CLI::error("Invalid table name '{$table}'. Table names may only contain letters, numbers, and underscores.");
+            return;
+        }
         $timestamp = date('Y-m-d-His');
         $fileName  = "{$timestamp}_{$name}.php";
 
@@ -75,7 +89,7 @@ class TenantsMakeMigration extends BaseCommand
             return;
         }
 
-        if (! is_dir($targetDir) && ! @mkdir($targetDir, 0777, true) && ! is_dir($targetDir)) {
+        if (! is_dir($targetDir) && ! @mkdir($targetDir, 0755, true) && ! is_dir($targetDir)) {
             CLI::error("Failed to create directory: {$targetDir}");
             return;
         }
@@ -87,7 +101,7 @@ class TenantsMakeMigration extends BaseCommand
             return;
         }
 
-        $contents = $this->renderTemplate($namespace, $name, $table);
+        $contents = $this->renderTemplate($namespace, $name, $table, $config);
 
         if (file_put_contents($filePath, $contents) === false) {
             CLI::error("Failed to write file: {$filePath}");
@@ -103,8 +117,55 @@ class TenantsMakeMigration extends BaseCommand
         CLI::write('');
     }
 
-    private function renderTemplate(string $namespace, string $className, string $table): string
-    {
+    private function renderTemplate(
+        string $namespace,
+        string $className,
+        string $table,
+        TenantableConfig $config,
+    ): string {
+        // Row mode needs a NOT NULL, indexed, FK-constrained tenant column;
+        // prefix/database modes isolate elsewhere and get none.
+        $isRowMode = $config->resolvedIsolationMode() === 'row';
+
+        // Prefix mode routes table names through TenantTableManager so they
+        // resolve per tenant at run time.
+        $isPrefixMode = $config->resolvedIsolationMode() === 'prefix';
+
+        $tableManagerImport = '';
+        $tableManagerInit   = '';
+        $createTableCall    = "\$this->forge->createTable('{$table}', true);";
+        $dropTableCall      = "\$this->forge->dropTable('{$table}', true);";
+
+        if ($isPrefixMode) {
+            $tableManagerImport = "\nuse nuelcyoung\\tenantable\\Services\\TenantTableManager;";
+            $tableManagerInit   = "        \$tableManager = TenantTableManager::getInstance();\n\n";
+            $createTableCall    = "\$this->forge->createTable(\$tableManager->getTable('{$table}'), true);";
+            $dropTableCall      = "\$this->forge->dropTable(\$tableManager->getTable('{$table}'), true);";
+        }
+
+        $tenantField = '';
+        $tenantKeys  = '';
+
+        if ($isRowMode) {
+            $tenantColumn = $config->tenantIdColumn;
+            $tenantsTable = $config->tenantsTable;
+
+            // Explicit indentation: interpolated as a unit at column 0.
+            $tenantField = implode("\n", [
+                "            '{$tenantColumn}' => [",
+                "                'type'       => 'BIGINT',",
+                "                'constraint' => 20,",
+                "                'unsigned'   => true,",
+                "                'null'       => false,",
+                '            ],',
+            ]);
+
+            $tenantKeys = implode("\n", [
+                "        \$this->forge->addKey('{$tenantColumn}');",
+                "        \$this->forge->addForeignKey('{$tenantColumn}', '{$tenantsTable}', 'id', 'CASCADE', 'CASCADE');",
+            ]);
+        }
+
         return <<<PHP
         <?php
 
@@ -112,19 +173,20 @@ class TenantsMakeMigration extends BaseCommand
 
         namespace {$namespace};
 
-        use CodeIgniter\\Database\\Migration;
+        use CodeIgniter\\Database\\Migration;{$tableManagerImport}
 
         class {$className} extends Migration
         {
             public function up(): void
             {
-                \$this->forge->addField([
+        {$tableManagerInit}        \$this->forge->addField([
                     'id' => [
-                        'type'           => 'INT',
-                        'constraint'     => 11,
+                        'type'           => 'BIGINT',
+                        'constraint'     => 20,
                         'unsigned'       => true,
                         'auto_increment' => true,
                     ],
+        {$tenantField}
                     'created_at' => [
                         'type' => 'DATETIME',
                         'null' => true,
@@ -136,12 +198,13 @@ class TenantsMakeMigration extends BaseCommand
                 ]);
 
                 \$this->forge->addKey('id', true);
-                \$this->forge->createTable('{$table}', true);
+        {$tenantKeys}
+                {$createTableCall}
             }
 
             public function down(): void
             {
-                \$this->forge->dropTable('{$table}', true);
+        {$tableManagerInit}        {$dropTableCall}
             }
         }
 
@@ -203,5 +266,15 @@ class TenantsMakeMigration extends BaseCommand
     {
         $value = preg_replace('/([a-z0-9])([A-Z])/', '$1_$2', $value) ?? $value;
         return strtolower($value);
+    }
+
+    private function isValidTableName(string $table): bool
+    {
+        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table) === 1;
+    }
+
+    private function isValidNamespace(string $namespace): bool
+    {
+        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*(\\\\[A-Za-z_][A-Za-z0-9_]*)*$/', $namespace) === 1;
     }
 }

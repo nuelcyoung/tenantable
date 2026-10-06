@@ -21,16 +21,34 @@ class CreateTenantDomainsTable extends Migration
 
     public function up(): void
     {
+        $sslState = [
+            'type'       => 'ENUM',
+            'constraint' => ['none', 'pending', 'active', 'failed'],
+            'default'    => 'none',
+            'null'       => false,
+        ];
+
+        if (($this->db->DBDriver ?? '') === 'Postgre') {
+            // PostgreSQL has no inline ENUM type. The domain model validates
+            // the same supported values for its portable VARCHAR column.
+            $sslState = [
+                'type'       => 'VARCHAR',
+                'constraint' => 16,
+                'default'    => 'none',
+                'null'       => false,
+            ];
+        }
+
         $this->forge->addField([
             'id' => [
-                'type'           => 'INT',
-                'constraint'     => 11,
+                'type'           => 'BIGINT',
+                'constraint'     => 20,
                 'unsigned'       => true,
                 'auto_increment' => true,
             ],
             'tenant_id' => [
-                'type'       => 'INT',
-                'constraint' => 11,
+                'type'       => 'BIGINT',
+                'constraint' => 20,
                 'unsigned'   => true,
                 'null'       => false,
             ],
@@ -56,12 +74,7 @@ class CreateTenantDomainsTable extends Migration
                 'type' => 'DATETIME',
                 'null' => true,
             ],
-            'ssl_state' => [
-                'type'    => 'ENUM',
-                'constraint' => ['none', 'pending', 'active', 'failed'],
-                'default' => 'none',
-                'null'    => false,
-            ],
+            'ssl_state' => $sslState,
             'created_at' => [
                 'type' => 'DATETIME',
                 'null' => true,
@@ -74,7 +87,6 @@ class CreateTenantDomainsTable extends Migration
 
         $this->forge->addKey('id', true);
         $this->forge->addKey('tenant_id');
-        $this->forge->addKey('domain');
         $this->forge->addForeignKey('tenant_id', 'tenants', 'id', 'CASCADE', 'CASCADE');
         $this->forge->createTable('tenant_domains', true);
     }

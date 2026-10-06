@@ -18,17 +18,21 @@ use CodeIgniter\CLI\CLI;
 use Config\Services;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
 use nuelcyoung\tenantable\Models\TenantModel;
-use nuelcyoung\tenantable\Services\TenantTableManager;
+use nuelcyoung\tenantable\Traits\NormalizesCliOptions;
+use nuelcyoung\tenantable\Traits\ReportsInfrastructure;
 
 class TenantsSetup extends BaseCommand
 {
+    use NormalizesCliOptions;
+    use ReportsInfrastructure;
+
     protected $group       = 'Tenantable';
     protected $name        = 'tenants:setup';
     protected $description = 'Provision tenant storage for the configured isolation mode.';
     protected $usage       = 'tenants:setup [--mode=row|prefix|database] [--create-db] [--tenants=1,2]';
     protected $options     = [
         '--mode'      => 'Override the configured isolation mode (row|prefix|database).',
-        '--create-db' => 'For database mode: CREATE DATABASE IF NOT EXISTS per tenant.',
+        '--create-db' => 'For database mode: create a database for each tenant when missing.',
         '--tenants'   => 'Comma-separated tenant IDs (default: all active).',
     ];
 
@@ -49,6 +53,8 @@ class TenantsSetup extends BaseCommand
         if (!$this->migrateCentral()) {
             return;
         }
+
+        $this->reportInfrastructure();
 
         if ($mode === 'row') {
             CLI::write('');
@@ -74,7 +80,7 @@ class TenantsSetup extends BaseCommand
         }
 
         if ($mode === 'prefix') {
-            $this->setupPrefixMode($tenants, $namespace);
+            $this->setupPrefixMode($tenants, $config);
             return;
         }
 
@@ -83,24 +89,23 @@ class TenantsSetup extends BaseCommand
 
     private function resolveMode(TenantableConfig $config): ?string
     {
-        $mode = CLI::getOption('mode') ?: $config->isolationMode;
+        $override = $this->cliOption('mode');
 
-        if ($mode === null) {
-            $mode = $config->separateDatabasePerTenant ? 'database' : 'row';
+        if (!empty($override)) {
+            if (!in_array($override, ['row', 'prefix', 'database'], true)) {
+                CLI::error("Invalid mode '{$override}'. Allowed: row, prefix, database.");
+                return null;
+            }
+            return $override;
         }
 
-        if (!in_array($mode, ['row', 'prefix', 'database'], true)) {
-            CLI::error("Invalid mode '{$mode}'. Allowed: row, prefix, database.");
-            return null;
-        }
-
-        return $mode;
+        return $config->resolvedIsolationMode();
     }
 
     private function migrateCentral(): bool
     {
         $config    = config(TenantableConfig::class);
-        $tableName = $config->tenantsTable ?? 'tenants';
+        $tableName = $config->tenantsTable;
 
         CLI::write('Migrating central tenants table...', 'yellow');
 
@@ -128,14 +133,18 @@ class TenantsSetup extends BaseCommand
         return true;
     }
 
-    private function setupPrefixMode(array $tenants, string $namespace): void
+    /**
+     * Provision prefix-mode tenants using the in-process migrator. CI4's
+     * MigrationRunner tracks by namespace only and would skip tenants 2..N.
+     */
+    private function setupPrefixMode(array $tenants, TenantableConfig $config): void
     {
         CLI::write('');
         CLI::write('Note: tenant migrations must reference tables via', 'light_gray');
         CLI::write('TenantTableManager::getInstance()->getTable(\'foo\') for prefixes to apply.', 'light_gray');
 
-        $tableManager = TenantTableManager::getInstance();
-        $runner       = Services::migrations();
+        $namespaces = $config->tenantMigrationNamespaces();
+        $manager    = $this->getDatabaseManager();
 
         $success = 0;
         $failed  = 0;
@@ -147,18 +156,34 @@ class TenantsSetup extends BaseCommand
             CLI::write('');
             CLI::write(CLI::color("[{$id}] {$name}", 'yellow'));
 
-            try {
-                $tableManager->setTenant($id, $tenant['subdomain'] ?? null);
-                $runner->setNamespace($namespace)->latest();
-                CLI::write(CLI::color('  migrations applied', 'green'));
-                $success++;
-            } catch (\Throwable $e) {
-                CLI::write(CLI::color('  failed: ' . $e->getMessage(), 'red'));
+            $tenantFailed = false;
+
+            foreach ($namespaces as $ns) {
+                $applied = $manager->migrateTenantTables($tenant, $ns);
+
+                if ($applied === null) {
+                    CLI::write(CLI::color("  failed: {$ns}", 'red'));
+                    $tenantFailed = true;
+                    break;
+                }
+
+                if ($applied === 0 && $manager->findTenantMigrationFiles($ns) === []) {
+                    CLI::write(CLI::color("  warning: no migration files found for {$ns}", 'yellow'));
+                    continue;
+                }
+
+                CLI::write(CLI::color(
+                    "  {$ns}: " . ($applied > 0 ? "{$applied} migration(s) applied" : 'up to date'),
+                    'green'
+                ));
+            }
+
+            if ($tenantFailed) {
                 $failed++;
+            } else {
+                $success++;
             }
         }
-
-        $tableManager->clear();
 
         CLI::write('');
         CLI::write("  {$success} succeeded" . ($failed > 0 ? ", {$failed} failed" : '') . '.');
@@ -167,7 +192,7 @@ class TenantsSetup extends BaseCommand
 
     private function setupDatabaseMode(array $tenants, string $namespace): void
     {
-        $createDb = (bool) CLI::getOption('create-db');
+        $createDb = $this->hasCliOption('create-db');
         $runner   = Services::migrations();
 
         $success = 0;
@@ -234,7 +259,7 @@ class TenantsSetup extends BaseCommand
     {
         $config = config(TenantableConfig::class);
         return new \nuelcyoung\tenantable\Services\TenantDatabaseManager(
-            $config->separateDatabasePerTenant,
+            $config->isDatabaseIsolation(),
             $config->defaultDatabaseGroup,
         );
     }
@@ -242,7 +267,7 @@ class TenantsSetup extends BaseCommand
     private function resolveTenants(): array
     {
         $model     = new TenantModel();
-        $idsOption = CLI::getOption('tenants');
+        $idsOption = $this->cliOption('tenants');
 
         try {
             if (!empty($idsOption)) {

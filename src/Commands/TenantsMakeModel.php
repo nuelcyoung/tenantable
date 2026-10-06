@@ -16,9 +16,12 @@ namespace nuelcyoung\tenantable\Commands;
 use CodeIgniter\CLI\BaseCommand;
 use CodeIgniter\CLI\CLI;
 use nuelcyoung\tenantable\Config\Tenantable as TenantableConfig;
+use nuelcyoung\tenantable\Traits\NormalizesCliOptions;
 
 class TenantsMakeModel extends BaseCommand
 {
+    use NormalizesCliOptions;
+
     protected $group       = 'Tenantable';
     protected $name        = 'tenants:make-model';
     protected $description = 'Generate a tenant-scoped or global model class.';
@@ -50,10 +53,10 @@ class TenantsMakeModel extends BaseCommand
             return;
         }
 
-        $global    = (bool) CLI::getOption('global');
-        $isPrefix  = (bool) CLI::getOption('prefix');
-        $force     = (bool) CLI::getOption('force');
-        $noSuffix  = (bool) CLI::getOption('no-suffix');
+        $global    = $this->hasCliOption('global');
+        $isPrefix  = $this->hasCliOption('prefix');
+        $force     = $this->hasCliOption('force');
+        $noSuffix  = $this->hasCliOption('no-suffix');
 
         if ($global && $isPrefix) {
             CLI::error('Cannot combine --global with --prefix.');
@@ -62,15 +65,25 @@ class TenantsMakeModel extends BaseCommand
 
         $config = config(TenantableConfig::class);
 
-        $namespace = CLI::getOption('namespace');
-        if (! is_string($namespace) || $namespace === '') {
+        $namespace = $this->cliOption('namespace');
+        if ($namespace === null || $namespace === '') {
             $namespace = $global ? $config->globalModelsNamespace : $config->tenantModelsNamespace;
         }
         $namespace = trim($namespace, '\\');
 
+        if (! $this->isValidNamespace($namespace)) {
+            CLI::error("Invalid namespace '{$namespace}'. Use a valid PHP namespace, e.g. App\\Models\\Tenant.");
+            return;
+        }
+
         $className = $noSuffix || str_ends_with($rawName, 'Model') ? $rawName : $rawName . 'Model';
         $baseName  = preg_replace('/Model$/', '', $className) ?: $className;
-        $table     = (string) (CLI::getOption('table') ?: ($this->snakeCase($baseName) . 's'));
+        $table     = $this->cliOption('table') ?: ($this->snakeCase($baseName) . 's');
+
+        if (! $this->isValidTableName($table)) {
+            CLI::error("Invalid table name '{$table}'. Table names may only contain letters, numbers, and underscores.");
+            return;
+        }
 
         $targetDir = $this->resolveNamespaceDir($namespace);
         if ($targetDir === null) {
@@ -79,7 +92,7 @@ class TenantsMakeModel extends BaseCommand
             return;
         }
 
-        if (! is_dir($targetDir) && ! @mkdir($targetDir, 0777, true) && ! is_dir($targetDir)) {
+        if (! is_dir($targetDir) && ! @mkdir($targetDir, 0755, true) && ! is_dir($targetDir)) {
             CLI::error("Failed to create directory: {$targetDir}");
             return;
         }
@@ -239,5 +252,15 @@ class TenantsMakeModel extends BaseCommand
     {
         $value = preg_replace('/([a-z0-9])([A-Z])/', '$1_$2', $value) ?? $value;
         return strtolower($value);
+    }
+
+    private function isValidTableName(string $table): bool
+    {
+        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table) === 1;
+    }
+
+    private function isValidNamespace(string $namespace): bool
+    {
+        return preg_match('/^[A-Za-z_][A-Za-z0-9_]*(\\\\[A-Za-z_][A-Za-z0-9_]*)*$/', $namespace) === 1;
     }
 }

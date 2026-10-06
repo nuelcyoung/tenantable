@@ -51,7 +51,9 @@ class BackfillTenantDomainsFromTenants extends Migration
                 'tenant_id'   => $tenant['id'],
                 'domain'      => $domain,
                 'is_primary'  => 1,
-                'is_verified' => 1,
+                // A legacy domain was not verified by this package. Require
+                // an explicit DNS/HTTPS ownership check before resolution.
+                'is_verified' => 0,
                 'created_at'  => date('Y-m-d H:i:s'),
                 'updated_at'  => date('Y-m-d H:i:s'),
             ]);

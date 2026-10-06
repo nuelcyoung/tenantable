@@ -24,9 +24,7 @@ class TenantTableManagerTest extends TestCase
         parent::tearDown();
     }
 
-    // =========================================================================
     // Singleton Tests
-    // =========================================================================
 
     public function testGetInstanceReturnsSingleton(): void
     {
@@ -45,9 +43,7 @@ class TenantTableManagerTest extends TestCase
         $this->assertNotSame($instance1, $instance2);
     }
 
-    // =========================================================================
     // Table Prefix Tests
-    // =========================================================================
 
     public function testGetTableWithTenantSet(): void
     {
@@ -109,9 +105,7 @@ class TenantTableManagerTest extends TestCase
         $this->assertEquals('migrations', $tableName);
     }
 
-    // =========================================================================
     // Tenant Management Tests
-    // =========================================================================
 
     public function testSetTenantClearsCache(): void
     {
@@ -151,9 +145,7 @@ class TenantTableManagerTest extends TestCase
         $this->assertTrue($manager->hasTenant());
     }
 
-    // =========================================================================
     // Multiple Tables Tests
-    // =========================================================================
 
     public function testGetTablesReturnsAllPrefixed(): void
     {
@@ -210,15 +202,17 @@ class TenantTableManagerTest extends TestCase
         $this->assertEquals('t1_students', $tableName);
     }
 
-    public function testPrefixFormatWithSubdomain(): void
+    public function testSuffixPrefixFormatIsRejected(): void
     {
+        // Isolation rides CodeIgniter's native DBPrefix, which can only
+        // prepend; a format that puts {table} first can never be honoured,
+        // so it is refused up front rather than silently ignored.
         $manager = TenantTableManager::getInstance();
-        $manager->setPrefixFormat('{table}_{id}'); // Reversed order
-        $manager->setTenant(1, 'school1');
 
-        $tableName = $manager->getTable('students');
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches("/must end with '\{table\}'/");
 
-        $this->assertEquals('students_1', $tableName);
+        $manager->setPrefixFormat('{table}_{id}');
     }
 
     // =========================================================================
@@ -251,5 +245,18 @@ class TenantTableManagerTest extends TestCase
         $tenantId = $manager->extractTenantId('school_3_users');
 
         $this->assertEquals(3, $tenantId);
+    }
+
+    public function testExtractTenantIdEscapesRegexMetacharactersInFormat(): void
+    {
+        // A prefix format containing regex metacharacters (the literal dots)
+        // must be matched literally; without preg_quote the dots would act as
+        // wildcards and mis-parse unrelated table names.
+        $manager = TenantTableManager::getInstance();
+        $manager->setPrefixFormat('t.{id}.{table}');
+
+        $this->assertSame(7, $manager->extractTenantId('t.7.orders'));
+        // 'tX7Yorders' must NOT match: the dots are literal, not "any char".
+        $this->assertNull($manager->extractTenantId('tX7Yorders'));
     }
 }

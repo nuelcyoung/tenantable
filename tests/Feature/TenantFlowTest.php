@@ -8,7 +8,6 @@ use PHPUnit\Framework\TestCase;
 use nuelcyoung\tenantable\Services\TenantManager;
 use nuelcyoung\tenantable\Services\TenantTableManager;
 use nuelcyoung\tenantable\Bootstrap\TenantBootstrap;
-use nuelcyoung\tenantable\Bootstrap\Systems\TableSystem;
 
 /**
  * Integration tests for the complete tenant flow.
@@ -32,10 +31,6 @@ class TenantFlowTest extends TestCase
         TenantBootstrap::resetInstance();
         parent::tearDown();
     }
-
-    // =========================================================================
-    // Full Tenant Switch Flow
-    // =========================================================================
 
     public function testCompleteTenantSwitchFlow(): void
     {
@@ -84,10 +79,7 @@ class TenantFlowTest extends TestCase
         $this->assertFalse($tableManager->hasTenant());
     }
 
-    // =========================================================================
     // Error Handling Tests
-    // =========================================================================
-
     public function testTableWithoutTenantThrows(): void
     {
         $tableManager = TenantTableManager::getInstance();
@@ -107,10 +99,7 @@ class TenantFlowTest extends TestCase
         $this->assertEquals('migrations', $tableManager->getTable('migrations'));
     }
 
-    // =========================================================================
-    // Multiple Tables Consistency Tests
-    // =========================================================================
-
+    // Consistency Tests
     public function testMultipleTablesSameTenantConsistency(): void
     {
         $tableManager = TenantTableManager::getInstance();
@@ -136,10 +125,7 @@ class TenantFlowTest extends TestCase
         $this->assertEquals('tenant_999_students', $tableManager->getTable('students'));
     }
 
-    // =========================================================================
     // Cache Invalidation Tests
-    // =========================================================================
-
     public function testTableCacheInvalidatedOnTenantChange(): void
     {
         $tableManager = TenantTableManager::getInstance();

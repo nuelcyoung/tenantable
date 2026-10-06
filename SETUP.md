@@ -283,8 +283,8 @@ keyspace.
 **Key prefixes are the only recommended isolation for Redis.**
 
 `setUseDatabasePerTenant(true)` additionally moves each tenant onto its own
-logical Redis database (tenant 1 → DB 0, tenant 2 → DB 1, …). This mode is
-**deprecated** and will be removed in v2.0:
+logical Redis database (tenant 1 → DB 0, tenant 2 → DB 1, …). The method still
+exists in 2.0 but the mode is **deprecated** and is scheduled for removal:
 
 - Redis ships 16 logical databases by default (`maxDatabase`, index 0–15), and
   raising the server limit is discouraged upstream — Redis Cluster supports
@@ -491,7 +491,7 @@ Tenantable defends this at runtime: every session is stamped with the tenant it 
    - file handler — delete everything under `writable/session/`;
    - database handler — `TRUNCATE ci_sessions` in every database that has one;
    - Redis — delete the session keys for your configured prefix.
-3. Alternatively (or additionally), set `$rejectUnboundSessions = true` for a release cycle: any session created before stamping existed is destroyed on first use instead of being adopted, forcing a clean re-login. Turn it back off once pre-switch sessions have aged out.
+3. Sessions that predate the tenant stamp carry no tenant ID and are destroyed on first use, because `$rejectUnboundSessions` defaults to on. Set it to `false` if you would rather adopt those sessions once, then turn it back on after they have aged out.
 4. Expect all users to log in again — that is the correct outcome.
 
 ---

@@ -16,11 +16,38 @@ use nuelcyoung\tenantable\Config\Tenantable as BaseTenantable;
  */
 class Tenantable extends BaseTenantable
 {
-    public string $baseDomain = '{{base_domain}}';
+    public string $baseDomain = {{base_domain}};
 
     public ?string $isolationMode = {{isolation_mode}};
 
     public bool $separateDatabasePerTenant = {{separate_db}};
+
+    /** Existing PostgreSQL database used to create tenant databases. */
+    public string $postgresAdminDatabase = 'postgres';
+
+    /**
+     * Fail closed in row mode: models refuse to read, write, or delete when
+     * no tenant context is active. Wrap cross-tenant access in withoutTenant().
+     */
+    public bool $strictTenantIsolation = true;
+
+    /** Set true only for local development; reject loopback Host headers in production. */
+    public bool $allowLocalhost = false;
+
+    /**
+     * Refuse to boot in production when tenant sessions or cache entries live
+     * on node-local disk (file session handler, file cache handler). Turn this
+     * on once the app runs behind more than one web server; it is ignored
+     * outside production. `php spark tenants:setup` reports the same findings
+     * as warnings whether or not this is enabled.
+     */
+    public bool $requireSharedInfrastructure = false;
+
+    /**
+     * Allowed HTTP_HOST patterns (supports wildcards). Null falls back to
+     * $baseDomain. Use ['*'] to accept every host.
+     */
+    public ?array $trustedHostPatterns = null;
 
     public string $identificationMethod = '{{identification_method}}';
 
@@ -29,4 +56,28 @@ class Tenantable extends BaseTenantable
     public string $earlyDetectionStrategy = '{{early_detection}}';
 
     public ?string $tenantMigrationsNamespace = 'App\\Database\\Migrations\\Tenant';
+
+    /**
+     * Provision new tenants through the queue instead of inside the request
+     * that created them. Needs a queue (`composer require codeigniter4/queue`)
+     * and the bundled `status` column migration. Until its job has run, a
+     * queued tenant does not resolve.
+     */
+    public bool $provisionAsync = false;
+
+    /**
+     * Ship the sessions-table migration to each tenant DB (database isolation
+     * only). CI4 ships no session-table migration by default; the database
+     * session handler needs ci_sessions in each tenant DB. Idempotent.
+     */
+    public bool $shipTenantSessionsTable = {{ship_sessions}};
+
+    /**
+     * Third-party package migrations to run in each tenant database.
+     * E.g. Shield's auth tables will be created inside each tenant DB.
+     */
+      //  public array $tenantMigrationsNamespaces = [
+      //      'CodeIgniter\Shield\Database\Migrations',
+      //      'CodeIgniter\Settings\Database\Migrations'
+      //  ];
 }
